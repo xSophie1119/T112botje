@@ -1,0 +1,2130 @@
+<?php
+/**
+ * Plugin Name:       Nieuws Distributie Systeem
+ * Plugin URI:        https://github.com/tilburg112/nds
+ * Description:       Een compleet pers-systeem met geïntegreerd dashboard, beveiligd persportaal en P2000-integratie.
+ * Version:           27.9.3
+ * Requires at least: 6.4
+ * Requires PHP:      7.4
+ * Author:            Tilburg112
+ * Text Domain:       nieuws-distributie-systeem
+ * Domain Path:       /languages
+ * License:           GPL v2 or later
+ */
+
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+define( 'SND_VERSION',     '28.7.2' );
+define( 'SND_PLUGIN_PATH', plugin_dir_path( __FILE__ ) );
+define( 'SND_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
+define( 'SND_PLUGIN_FILE', __FILE__ );
+
+// ── Tijdzone: altijd Amsterdam ────────────────────────────────────────────────
+// wp_date() gebruikt de WordPress-tijdzone-instelling, maar als die niet correct
+// is ingesteld, forceren we Europe/Amsterdam als fallback voor de plugin.
+add_action( 'plugins_loaded', function() {
+	$tz = get_option( 'timezone_string', '' );
+	if ( empty( $tz ) ) {
+		// Geen named timezone ingesteld — zet PHP fallback voor deze request
+		date_default_timezone_set( 'Europe/Amsterdam' );
+	}
+}, 1 );
+
+// ── Autoloader ────────────────────────────────────────────────────────────────
+spl_autoload_register( function ( $class ) {
+	if ( strncmp( $class, 'SND_', 4 ) !== 0 ) return;
+	$file = SND_PLUGIN_PATH . 'includes/class-' . strtolower( str_replace( '_', '-', $class ) ) . '.php';
+	if ( file_exists( $file ) ) require $file;
+} );
+
+// ── Activation / deactivation ─────────────────────────────────────────────────
+register_activation_hook( __FILE__, [ 'SND_Activator', 'activate' ] );
+register_deactivation_hook( __FILE__, [ 'SND_Activator', 'deactivate' ] );
+
+// ── Cron schedules ────────────────────────────────────────────────────────────
+add_filter( 'cron_schedules', function ( $s ) {
+	$s['snd_fifteen_minutes'] = [ 'interval' => 900, 'display' => 'Elke 15 minuten' ];
+	$s['snd_two_minutes']     = [ 'interval' => 120, 'display' => 'Elke 2 minuten' ];
+	return $s;
+} );
+
+add_action( 'snd_fetch_p2000_hook',   function () { ( new SND_P2000() )->fetch(); } );
+add_action( 'snd_geocode_batch_hook', function () { ( new SND_P2000() )->geocode_batch(); } );
+
+// ── Auto-archive eigen meldingen (every 15 min) ───────────────────────────────
+add_action( 'snd_fetch_p2000_hook', function () {
+	$hours = (int) get_option( 'snd_melding_auto_archive_hours', 0 );
+	if ( $hours <= 0 ) return;
+	$active  = get_option( 'snd_p2000_active_statuses', [] );
+	$cutoff  = time() - ( $hours * 3600 );
+	$changed = false;
+	foreach ( $active as $id => $item ) {
+		if ( ( $item['source'] ?? '' ) !== 'handmatig' ) continue;
+		if ( ( $item['time'] ?? 0 ) < $cutoff ) { unset( $active[ $id ] ); $changed = true; }
+	}
+	if ( $changed ) update_option( 'snd_p2000_active_statuses', $active );
+} );
+
+// ── Auto-cleanup pers-zips older than 24h ─────────────────────────────────────
+add_action( 'snd_fetch_p2000_hook', function () {
+	$upload  = wp_upload_dir();
+	$zip_dir = $upload['basedir'] . '/pers-zips/';
+	if ( ! is_dir( $zip_dir ) ) return;
+	$cutoff = time() - DAY_IN_SECONDS;
+	foreach ( glob( $zip_dir . '*.zip' ) ?: [] as $file ) {
+		if ( filemtime( $file ) < $cutoff ) @unlink( $file );
+	}
+} );
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+add_action( 'plugins_loaded', function () {
+	load_plugin_textdomain( 'nieuws-distributie-systeem', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
+	new SND_Admin();
+	new SND_Portal();
+	$chat = new SND_Chat();
+	add_action( 'admin_menu', [ $chat, 'register_submenu' ], 20 );
+} );
+
+// ── Telegram webhook (REST) ───────────────────────────────────────────────────
+add_action( 'rest_api_init', function () {
+	register_rest_route( 'snd/v1', '/telegram', [
+		'methods'             => 'POST',
+		'callback'            => 'snd_tg_webhook',
+		'permission_callback' => '__return_true',
+	] );
+} );
+
+function snd_tg_webhook( WP_REST_Request $request ) {
+	$token = get_option( 'snd_telegram_bot_token', '' );
+	if ( empty( $token ) ) return new WP_REST_Response( 'ok', 200 );
+
+	$body = $request->get_json_params();
+
+	if ( ! empty( $body['callback_query'] ) ) {
+		snd_tg_handle_callback( $body['callback_query'], $token );
+		return new WP_REST_Response( 'ok', 200 );
+	}
+
+	$msg = $body['message'] ?? $body['channel_post'] ?? null;
+	if ( ! $msg ) return new WP_REST_Response( 'ok', 200 );
+
+	$chat_id = (string) ( $msg['chat']['id'] ?? '' );
+	$text    = trim( $msg['text'] ?? $msg['caption'] ?? '' );
+	// Strip bot username suffix (e.g. /status@MyBot)
+	$text = preg_replace( '/@\w+$/', '', $text );
+
+	// ── Foto/bestand-upload via Telegram ─────────────────────────────────────
+	// 'photo'    = gecomprimeerde foto (Telegram comprimeert automatisch)
+	// 'document' = volledig bestand (volledige resolutie als je "Bestand" kiest)
+	$is_photo    = ! empty( $msg['photo'] );
+	$is_doc_img  = ! empty( $msg['document'] ) && (
+		strpos( $msg['document']['mime_type'] ?? '', 'image/' ) === 0 ||
+		in_array( strtolower( pathinfo( $msg['document']['file_name'] ?? '', PATHINFO_EXTENSION ) ),
+			[ 'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'tiff' ], true )
+	);
+
+	if ( ( $is_photo || $is_doc_img ) && ! empty( $chat_id ) ) {
+		snd_tg_handle_photo( $msg, $chat_id, $token );
+		return new WP_REST_Response( 'ok', 200 );
+	}
+
+	// ── Locatiepin via Telegram ───────────────────────────────────────────────
+	if ( ! empty( $msg['location'] ) && ! empty( $chat_id ) ) {
+		snd_tg_handle_location( $msg['location'], $chat_id, $token );
+		return new WP_REST_Response( 'ok', 200 );
+	}
+
+	if ( empty( $text ) || empty( $chat_id ) ) return new WP_REST_Response( 'ok', 200 );
+
+	$allowed_single = get_option( 'snd_telegram_chat_id', '' );
+	$recipients     = get_option( 'snd_telegram_recipients', [] );
+
+	// Build list of allowed chat IDs
+	$allowed_ids = [];
+	if ( $allowed_single ) $allowed_ids[] = (string) $allowed_single;
+	if ( is_array( $recipients ) ) {
+		foreach ( $recipients as $r ) {
+			if ( ! empty( $r['chat_id'] ) ) $allowed_ids[] = (string) $r['chat_id'];
+		}
+	}
+
+	if ( ! empty( $allowed_ids ) && ! in_array( $chat_id, $allowed_ids, true ) ) {
+		return new WP_REST_Response( 'ok', 200 );
+	}
+
+	// Store sender name — gebruik geconfigureerde naam als die er is
+	$from     = $msg['from'] ?? [];
+	$tg_raw   = trim( ( $from['first_name'] ?? '' ) . ' ' . ( $from['last_name'] ?? '' ) );
+	if ( empty( $tg_raw ) ) $tg_raw = $from['username'] ?? 'Telegram';
+	$tg_name  = snd_tg_resolve_name( $chat_id );
+	if ( $tg_name === 'Onbekend' ) $tg_name = $tg_raw; // fallback op Telegram naam
+
+	// ── Conversatie-staat: update mail + nieuw bericht via Telegram ──────────
+	$sess_key = 'snd_tg_upd_' . $chat_id;
+	$sess     = get_transient( $sess_key );
+	if ( is_array( $sess ) && ! empty( $text ) ) {
+		$step    = $sess['step'] ?? '';
+		$post_id = (int) ( $sess['post_id'] ?? 0 );
+
+		// /annuleer altijd mogelijk in sessie
+		if ( preg_match( '/^\/annuleer\b/i', $text ) ) {
+			delete_transient( $sess_key );
+			wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+				'timeout' => 8,
+				'body'    => [ 'chat_id' => $chat_id, 'text' => '❌ Sessie geannuleerd.', 'parse_mode' => 'Markdown' ],
+			] );
+			return new WP_REST_Response( 'ok', 200 );
+		}
+
+		// ── Nieuw bericht aanmaken flow ───────────────────────────────────────
+		if ( $step === 'new_title' ) {
+			$sess['title'] = $text;
+			$sess['step']  = 'new_body';
+			set_transient( $sess_key, $sess, 600 );
+			wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+				'timeout' => 8, 'body' => [ 'chat_id' => $chat_id, 'parse_mode' => 'Markdown',
+				'text' => "📰 Titel: *{$text}*\n\nTyp een korte *intro-tekst* voor het bericht (of stuur `/overslaan`):" ],
+			] );
+			return new WP_REST_Response( 'ok', 200 );
+
+		} elseif ( $step === 'new_body' ) {
+			$sess['body'] = $text === '/overslaan' ? '' : $text;
+			$sess['step'] = 'new_location';
+			set_transient( $sess_key, $sess, 600 );
+			wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+				'timeout' => 8, 'body' => [ 'chat_id' => $chat_id, 'parse_mode' => 'Markdown',
+				'text' => "📍 Stuur een *locatiepin* 📌 of typ een adres (bijv. `Hoofdstraat 1, Tilburg`)\nOf stuur `/overslaan` om door te gaan:" ],
+			] );
+			return new WP_REST_Response( 'ok', 200 );
+
+		} elseif ( $step === 'new_location' ) {
+			if ( $text !== '/overslaan' ) {
+				// Tekst-adres → geocodeer via Google
+				$geo = snd_tg_geocode( $text );
+				$sess['lat']    = $geo['lat'] ?? null;
+				$sess['lon']    = $geo['lon'] ?? null;
+				$sess['straat'] = $geo['straat'] ?? $text;
+				$sess['stad']   = $geo['stad'] ?? '';
+				$loc_bevestigd  = $geo ? "📍 Gevonden: *{$geo['display']}*" : "📍 Adres opgeslagen als tekst.";
+			} else {
+				$loc_bevestigd = '📍 Locatie overgeslagen.';
+			}
+			$sess['step'] = 'new_status';
+			set_transient( $sess_key, $sess, 600 );
+			$keyboard = [ [
+				[ 'text' => '🚨 Fotograaf onderweg',  'callback_data' => 'tgnew:status:onderweg' ],
+				[ 'text' => '📍 Fotograaf ter plaatse', 'callback_data' => 'tgnew:status:ter_plaatse' ],
+			], [ [ 'text' => '⏭ Status overslaan', 'callback_data' => 'tgnew:status:none' ] ] ];
+			snd_tg_send_msg( $token, $chat_id,
+				"{$loc_bevestigd}\n\nWat is de huidige *status van de fotograaf*?", $keyboard );
+			return new WP_REST_Response( 'ok', 200 );
+
+		} elseif ( $step === 'new_byline' ) {
+			$sess['byline'] = $text === '/overslaan' ? '' : $text;
+			$sess['step']   = 'new_category';
+			set_transient( $sess_key, $sess, 600 );
+			// Haal bestaande categorieën op en bouw keyboard
+			$cats = get_categories( [ 'hide_empty' => false, 'orderby' => 'name', 'order' => 'ASC' ] );
+			if ( empty( $cats ) ) {
+				// Geen categorieën — sla over naar tags
+				$sess['step'] = 'new_tags';
+				set_transient( $sess_key, $sess, 600 );
+				snd_tg_send_msg( $token, $chat_id,
+					"🏷 Typ *tags* voor dit bericht (komma-gescheiden, bijv. `brand, tilburg, hulpdiensten`)
+Of stuur `/overslaan`:" );
+			} else {
+				$keyboard = snd_tg_category_keyboard( $cats, [], $sess_key );
+				snd_tg_send_msg( $token, $chat_id,
+					"🗂 Selecteer *categorie(ën)* (meerdere mogelijk, dan bevestigen):", $keyboard );
+			}
+			return new WP_REST_Response( 'ok', 200 );
+
+		} elseif ( $step === 'new_tags' ) {
+			$sess['tags'] = $text === '/overslaan' ? '' : $text;
+			set_transient( $sess_key, $sess, 600 );
+			snd_tg_new_post_create( $sess, $chat_id, $token, $sess_key );
+			return new WP_REST_Response( 'ok', 200 );
+		}
+
+		// ── Update mail flow ──────────────────────────────────────────────────
+		if ( $step === 'subject' ) {
+			$sess['subject'] = $text;
+			$sess['step']    = 'body';
+			set_transient( $sess_key, $sess, 600 );
+			wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+				'timeout' => 8,
+				'body'    => [
+					'chat_id'    => $chat_id,
+					'text'       => "📝 Onderwerp: *" . $text . "*\n\nStuur nu de *tekst* van de update (mag meerdere regels zijn):",
+					'parse_mode' => 'Markdown',
+				],
+			] );
+			return new WP_REST_Response( 'ok', 200 );
+
+		} elseif ( $step === 'body' ) {
+			$subject   = $sess['subject'] ?? '';
+			$selected  = $sess['selected'] ?? [];
+			$body_text = $text;
+			delete_transient( $sess_key );
+
+			if ( $post_id && $subject && ! empty( $selected ) ) {
+				$result = snd_tg_send_update_email( $post_id, $subject, $body_text, $selected );
+				$msg_text = $result['sent'] > 0
+					? "✅ Update mail verstuurd naar *{$result['sent']}* ontvanger(s)!\n\n📰 Onderwerp: {$subject}"
+					: "❌ Versturen mislukt: " . ( $result['error'] ?? 'Onbekende fout' );
+			} else {
+				$msg_text = '❌ Sessie verlopen, geen ontvangers geselecteerd of bericht niet gevonden.';
+			}
+
+			wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+				'timeout' => 8,
+				'body'    => [ 'chat_id' => $chat_id, 'text' => $msg_text, 'parse_mode' => 'Markdown' ],
+			] );
+			return new WP_REST_Response( 'ok', 200 );
+		}
+	}
+
+	// Log de inkomende actie
+	if ( ! empty( $text ) && strncmp( $text, '/', 1 ) === 0 ) {
+		snd_tg_log( $chat_id, $tg_name, 'commando', $text );
+	}
+
+	$response = snd_tg_command( $text, $chat_id, $token, $tg_name );
+	if ( ! empty( $response['text'] ) ) {
+		$payload = [ 'chat_id' => $chat_id, 'text' => $response['text'], 'parse_mode' => 'Markdown' ];
+		if ( ! empty( $response['keyboard'] ) ) {
+			$payload['reply_markup'] = wp_json_encode( [ 'inline_keyboard' => $response['keyboard'] ] );
+		}
+		wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+			'timeout' => 10, 'body' => $payload,
+		] );
+	}
+	return new WP_REST_Response( 'ok', 200 );
+}
+
+// ── Telegram foto-upload afhandelen ─────────────────────────────────────────
+// Telegram stuurt meerdere foto's als aparte webhooks met dezelfde media_group_id.
+// We bufferen per groep en stellen na 4 sec slechts 1x de incident-vraag.
+
+function snd_tg_handle_photo( array $msg, string $chat_id, string $token ): void {
+	$caption = trim( $msg['caption'] ?? '' );
+	$group   = $msg['media_group_id'] ?? null;
+
+	// ── Haal file_id op — foto (gecomprimeerd) of document (volledige kwaliteit)
+	if ( ! empty( $msg['document'] ) ) {
+		// Verstuurd als bestand: volledige resolutie
+		$file_id  = $msg['document']['file_id'] ?? '';
+		$filename = $msg['document']['file_name'] ?? null;
+		$ext_hint = $filename ? strtolower( pathinfo( $filename, PATHINFO_EXTENSION ) ) : 'jpg';
+	} else {
+		// Verstuurd als foto: Telegram-gecomprimeerd
+		$photos  = $msg['photo'];
+		$largest = end( $photos );
+		$file_id  = $largest['file_id'] ?? '';
+		$ext_hint = 'jpg';
+		$filename = null;
+	}
+
+	if ( empty( $file_id ) ) return;
+
+	// ── Download + opslaan als WP-attachment ─────────────────────────────────
+	require_once ABSPATH . 'wp-admin/includes/image.php';
+	require_once ABSPATH . 'wp-admin/includes/file.php';
+	require_once ABSPATH . 'wp-admin/includes/media.php';
+
+	$api_resp = wp_remote_get(
+		'https://api.telegram.org/bot' . $token . '/getFile?file_id=' . urlencode( $file_id ),
+		[ 'timeout' => 10 ]
+	);
+	if ( is_wp_error( $api_resp ) ) return;
+
+	$data      = json_decode( wp_remote_retrieve_body( $api_resp ), true );
+	$file_path = $data['result']['file_path'] ?? '';
+	if ( empty( $file_path ) ) return;
+
+	$file_url = 'https://api.telegram.org/file/bot' . $token . '/' . $file_path;
+	$tmp      = download_url( $file_url );
+	if ( is_wp_error( $tmp ) ) return;
+
+	$ts = wp_date( 'Ymd-His' );
+	// Bestandsnaam: gebruik originele naam (document) of genereer er een (foto)
+	if ( $filename ) {
+		$safe_name = sanitize_file_name( $filename );
+	} else {
+		$ext_from_path = pathinfo( $file_path, PATHINFO_EXTENSION ) ?: $ext_hint;
+		$safe_name     = 'tg-foto-' . $ts . '-' . substr( $file_id, -6 ) . '.' . $ext_from_path;
+	}
+	$file_arr = [ 'name' => $safe_name, 'tmp_name' => $tmp, 'error' => 0, 'size' => filesize( $tmp ) ];
+
+	$attach_id = media_handle_sideload( $file_arr, 0, $caption ?: 'Telegram foto ' . $ts );
+	@unlink( $tmp );
+
+	if ( is_wp_error( $attach_id ) ) {
+		if ( ! $group ) {
+			wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+				'timeout' => 8, 'body' => [ 'chat_id' => $chat_id,
+				'text' => '❌ Opslaan mislukt: ' . $attach_id->get_error_message() ],
+			] );
+		}
+		return;
+	}
+
+	if ( $group ) {
+		// ── Groepsbuffer zonder cron — race-condition-proof ──────────────────
+		// Telegram stuurt foto's snel achtereen als aparte webhooks.
+		// We zetten de lock VOOR het downloaden was al gedaan hierboven,
+		// dus hier plaatsen we hem gewoon direct.
+		$buf_key  = 'snd_tg_photobuf_' . md5( $chat_id . $group );
+		$lock_key = 'snd_tg_photolock_' . md5( $chat_id . $group );
+
+		// is_first: lock bestaat nog niet
+		$is_first = ! get_transient( $lock_key );
+		if ( $is_first ) {
+			set_transient( $lock_key, 1, 120 );
+			set_transient( $buf_key, [ 'ids' => [], 'msg_id' => 0 ], 120 );
+		}
+
+		// Voeg attach_id toe aan de buffer
+		$buf = get_transient( $buf_key );
+		if ( ! is_array( $buf ) ) $buf = [ 'ids' => [], 'msg_id' => 0 ];
+		if ( ! in_array( $attach_id, $buf['ids'], true ) ) {
+			$buf['ids'][] = $attach_id;
+		}
+		set_transient( $buf_key, $buf, 120 );
+
+		if ( $is_first ) {
+			// Eerste foto: stuur vraagbericht direct
+			$sent = snd_tg_photo_send_ask( $buf['ids'], $chat_id, $token, $caption );
+			if ( $sent ) {
+				$buf = get_transient( $buf_key );
+				if ( ! is_array( $buf ) ) $buf = [ 'ids' => [ $attach_id ], 'msg_id' => 0 ];
+				$buf['msg_id'] = $sent;
+				set_transient( $buf_key, $buf, 120 );
+			}
+		} else {
+			// Volgende foto's: wacht tot foto 1 klaar is (msg_id beschikbaar)
+			$waited = 0;
+			while ( $waited < 5 ) {
+				$buf    = get_transient( $buf_key );
+				$msg_id = is_array( $buf ) ? (int) ( $buf['msg_id'] ?? 0 ) : 0;
+				if ( $msg_id ) break;
+				sleep( 1 );
+				$waited++;
+			}
+			$buf    = get_transient( $buf_key );
+			$msg_id = is_array( $buf ) ? (int) ( $buf['msg_id'] ?? 0 ) : 0;
+
+			if ( $msg_id ) {
+				$all_ids    = $buf['ids'];
+				$id_str     = implode( ',', $all_ids );
+				$count      = count( $all_ids );
+				$foto_tekst = $count === 1 ? '1 foto' : "{$count} foto's";
+				$posts      = snd_tg_get_incident_posts();
+				$keyboard   = [];
+				foreach ( $posts as $p ) {
+					$title      = mb_strlen( $p->post_title ) > 36 ? mb_substr( $p->post_title, 0, 33 ) . '…' : $p->post_title;
+					$keyboard[] = [ [ 'text' => '📰 ' . $title, 'callback_data' => 'tgphotos:' . $p->ID . ':' . $id_str ] ];
+				}
+				$keyboard[] = [ [ 'text' => '❌ Niet koppelen', 'callback_data' => 'tgphotos:0:' . $id_str ] ];
+			$keyboard[] = [ [ 'text' => '📝 Nieuw bericht aanmaken', 'callback_data' => 'tgnewpost:' . $id_str ] ];
+				wp_remote_post( 'https://api.telegram.org/bot' . $token . '/editMessageText', [
+					'timeout' => 8,
+					'body'    => [
+						'chat_id'      => $chat_id,
+						'message_id'   => $msg_id,
+						'text'         => "✅ {$foto_tekst} opgeslagen.\n\nAan welk *verstuurd bericht* wil je ze koppelen?",
+						'parse_mode'   => 'Markdown',
+						'reply_markup' => wp_json_encode( [ 'inline_keyboard' => $keyboard ] ),
+					],
+				] );
+			}
+		}
+		return;
+	}
+
+	// ── Enkelvoudige foto ─────────────────────────────────────────────────────
+	snd_tg_photo_send_ask( [ $attach_id ], $chat_id, $token, $caption );
+}
+
+// ── Haal laatste 4 verstuurde berichten op ───────────────────────────────────
+function snd_tg_get_incident_posts(): array {
+	return get_posts( [
+		'post_type'   => 'post',
+		'post_status' => 'publish',
+		'numberposts' => 4,
+		'orderby'     => 'date',
+		'order'       => 'DESC',
+		'meta_query'  => [ [ 'key' => '_snd_dispatch_log', 'compare' => 'EXISTS' ] ],
+	] );
+}
+
+// ── Stuur het vraagbericht en retourneer het message_id ──────────────────────
+function snd_tg_photo_send_ask( array $attach_ids, string $chat_id, string $token, string $caption ): int {
+	$count      = count( $attach_ids );
+	$id_str     = implode( ',', $attach_ids );
+	$foto_tekst = $count === 1 ? '1 foto' : "{$count} foto's";
+	$posts      = snd_tg_get_incident_posts();
+
+	if ( empty( $posts ) ) {
+		wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+			'timeout' => 8,
+			'body'    => [
+				'chat_id'    => $chat_id,
+				'text'       => "✅ {$foto_tekst} opgeslagen.
+
+Geen verstuurde berichten gevonden om aan te koppelen.",
+				'parse_mode' => 'Markdown',
+			],
+		] );
+		return 0;
+	}
+
+	$keyboard = [];
+	foreach ( $posts as $p ) {
+		$title      = mb_strlen( $p->post_title ) > 36 ? mb_substr( $p->post_title, 0, 33 ) . '…' : $p->post_title;
+		$keyboard[] = [ [ 'text' => '📰 ' . $title, 'callback_data' => 'tgphotos:' . $p->ID . ':' . $id_str ] ];
+	}
+	$keyboard[] = [ [ 'text' => '❌ Niet koppelen', 'callback_data' => 'tgphotos:0:' . $id_str ] ];
+	$keyboard[] = [ [ 'text' => '📝 Nieuw bericht aanmaken', 'callback_data' => 'tgnewpost:' . $id_str ] ];
+
+	$resp = wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+		'timeout' => 8,
+		'body'    => [
+			'chat_id'      => $chat_id,
+			'text'         => "✅ {$foto_tekst} opgeslagen.
+
+Aan welk *verstuurd bericht* wil je ze koppelen?",
+			'parse_mode'   => 'Markdown',
+			'reply_markup' => wp_json_encode( [ 'inline_keyboard' => $keyboard ] ),
+		],
+	] );
+
+	// Retourneer het message_id zodat we het kunnen updaten bij volgende foto's
+	if ( ! is_wp_error( $resp ) ) {
+		$data = json_decode( wp_remote_retrieve_body( $resp ), true );
+		return (int) ( $data['result']['message_id'] ?? 0 );
+	}
+	return 0;
+}
+
+
+// ── Bouw ontvanger-selectie keyboard ─────────────────────────────────────────
+function snd_tg_build_recipient_keyboard( array $all, array $selected, int $post_id, array $outlets ): array {
+	$keyboard = [];
+	foreach ( $all as $email ) {
+		// Zoek naam op in outlets
+		$name = $email;
+		foreach ( $outlets as $o ) {
+			if ( strtolower( $o['email'] ) === strtolower( $email ) ) {
+				$name = $o['name'];
+				break;
+			}
+		}
+		$is_on  = in_array( $email, $selected, true );
+		$label  = ( $is_on ? '✅ ' : '☐ ' ) . mb_substr( $name, 0, 28 );
+		$keyboard[] = [ [ 'text' => $label, 'callback_data' => 'tgupdate:rcpt:' . $post_id . ':' . $email ] ];
+	}
+	// Bevestigknop onderaan
+	$count = count( $selected );
+	$keyboard[] = [ [
+		'text'          => "📢 Verstuur naar {$count} ontvanger(s)",
+		'callback_data' => 'tgupdate:allrcpt:' . $post_id,
+	] ];
+	$keyboard[] = [ [
+		'text'          => '❌ Annuleren',
+		'callback_data' => 'tgupdate:skip:' . $post_id,
+	] ];
+	return $keyboard;
+}
+
+// ── Update mail versturen vanuit Telegram ────────────────────────────────────
+function snd_tg_send_update_email( int $post_id, string $subject, string $body_text, array $recipients = [] ): array {
+	$post = get_post( $post_id );
+	if ( ! $post ) return [ 'sent' => 0, 'error' => 'Bericht niet gevonden.' ];
+
+	// Haal ontvangers op — gebruik de doorgegeven selectie, of anders iedereen uit dispatch_log
+	$dispatch_log = get_post_meta( $post_id, '_snd_dispatch_log', true );
+	if ( ! is_array( $dispatch_log ) || empty( $dispatch_log ) ) {
+		return [ 'sent' => 0, 'error' => 'Geen eerdere ontvangers gevonden.' ];
+	}
+
+	// Filter op geselecteerde ontvangers (als die meegegeven zijn)
+	if ( empty( $recipients ) ) {
+		$send_to = array_keys( $dispatch_log );
+	} else {
+		$log_keys_lower = array_map( 'strtolower', array_keys( $dispatch_log ) );
+		$send_to = array_values( array_filter( $recipients, function( $e ) use ( $log_keys_lower ) {
+			return in_array( strtolower( $e ), $log_keys_lower, true );
+		} ) );
+	}
+
+	// Normaliseer: match case-insensitief met dispatch_log keys
+	$final_emails = [];
+	foreach ( $send_to as $r ) {
+		foreach ( array_keys( $dispatch_log ) as $logged ) {
+			if ( strtolower( $logged ) === strtolower( $r ) ) {
+				$final_emails[] = $logged;
+				break;
+			}
+		}
+	}
+	$final_emails = array_unique( $final_emails );
+
+	if ( empty( $final_emails ) ) {
+		return [ 'sent' => 0, 'error' => 'Geen overeenkomende ontvangers gevonden.' ];
+	}
+
+	$outlets      = get_option( 'snd_media_outlets_v4', [] );
+	$from_name    = get_option( 'snd_email_from_name', get_bloginfo( 'name' ) );
+	$from_email   = get_option( 'snd_email_from_email', get_bloginfo( 'admin_email' ) );
+	$site_name    = get_bloginfo( 'name' );
+	$accent_color = get_option( 'snd_email_accent_color', '#3b82f6' );
+	$post_url     = get_permalink( $post_id );
+	$sent         = 0;
+
+	require_once ABSPATH . 'wp-includes/pluggable.php';
+
+	foreach ( $final_emails as $email ) {
+		$outlet = null;
+		foreach ( $outlets as $o ) {
+			if ( strtolower( $o['email'] ) === strtolower( $email ) ) { $outlet = $o; break; }
+		}
+		if ( ! $outlet ) continue;
+
+		$portal_url  = home_url( '/persportaal/?access_code=' . rawurlencode( $outlet['access_code'] ) );
+		$custom_note = $outlet['custom_email_note'] ?? '';
+
+		ob_start();
+		$tpl = WP_CONTENT_DIR . '/plugins/nieuws-distributie-systeem/templates/email-update-template.php';
+		if ( file_exists( $tpl ) ) include $tpl;
+		$html_body = ob_get_clean();
+
+		if ( empty( trim( $html_body ) ) ) continue;
+
+		$ok = wp_mail(
+			$email, $subject, $html_body,
+			[ 'Content-Type: text/html; charset=UTF-8', "From: {$from_name} <{$from_email}>" ]
+		);
+		if ( $ok ) $sent++;
+	}
+
+	// Log de update in post meta
+	if ( $sent > 0 ) {
+		$update_log   = get_post_meta( $post_id, '_snd_update_log', true );
+		if ( ! is_array( $update_log ) ) $update_log = [];
+		$update_log[] = [
+			'subject'    => $subject,
+			'recipients' => $final_emails,
+			'time'       => time(),
+			'via'        => 'telegram',
+		];
+		update_post_meta( $post_id, '_snd_update_log', $update_log );
+	}
+
+	return $sent > 0
+		? [ 'sent' => $sent ]
+		: [ 'sent' => 0, 'error' => 'wp_mail mislukt voor alle ontvangers.' ];
+}
+
+
+// ── Helper: stuur een Telegram-bericht ───────────────────────────────────────
+function snd_tg_send_msg( string $token, string $chat_id, string $text, ?array $keyboard = null ): void {
+	$body = [ 'chat_id' => $chat_id, 'text' => $text, 'parse_mode' => 'Markdown' ];
+	if ( $keyboard !== null ) {
+		$body['reply_markup'] = wp_json_encode( [ 'inline_keyboard' => $keyboard ] );
+	}
+	wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+		'timeout' => 8, 'body' => $body,
+	] );
+}
+
+// ── Locatiepin verwerken ──────────────────────────────────────────────────────
+function snd_tg_handle_location( array $loc, string $chat_id, string $token ): void {
+	$lat = (float) ( $loc['latitude']  ?? 0 );
+	$lon = (float) ( $loc['longitude'] ?? 0 );
+	if ( ! $lat || ! $lon ) return;
+
+	$sess_key = 'snd_tg_upd_' . $chat_id;
+	$sess     = get_transient( $sess_key );
+
+	if ( is_array( $sess ) && ( $sess['step'] ?? '' ) === 'new_location' ) {
+		$geo = snd_tg_reverse_geocode( $lat, $lon );
+		$sess['lat']    = $lat;
+		$sess['lon']    = $lon;
+		$sess['straat'] = $geo['straat'] ?? '';
+		$sess['stad']   = $geo['stad']   ?? '';
+		$sess['step']   = 'new_status';
+		set_transient( $sess_key, $sess, 600 );
+
+		$display  = $geo['display'] ?? "{$lat}, {$lon}";
+		$keyboard = [ [
+			[ 'text' => '🚨 Fotograaf onderweg',   'callback_data' => 'tgnew:status:onderweg' ],
+			[ 'text' => '📍 Fotograaf ter plaatse', 'callback_data' => 'tgnew:status:ter_plaatse' ],
+		], [ [ 'text' => '⏭ Status overslaan', 'callback_data' => 'tgnew:status:none' ] ] ];
+		snd_tg_send_msg( $token, $chat_id,
+			"📍 Locatie ontvangen: *{$display}*\n\nWat is de huidige *status van de fotograaf*?",
+			$keyboard );
+	} else {
+		$geo     = snd_tg_reverse_geocode( $lat, $lon );
+		$display = $geo['display'] ?? round( $lat, 4 ) . ', ' . round( $lon, 4 );
+		snd_tg_send_msg( $token, $chat_id,
+			"📍 Locatie: *{$display}*\n\nStart een sessie door foto's te sturen of /nieuwbericht te typen." );
+	}
+}
+
+// ── Google Geocoding: adres -> coordinaten ────────────────────────────────────
+function snd_tg_geocode( string $address ): array {
+	$api_key = get_option( 'snd_google_maps_api_key', '' );
+	if ( empty( $api_key ) ) return [];
+	$url  = 'https://maps.googleapis.com/maps/api/geocode/json?address=' . urlencode( $address ) . '&key=' . $api_key . '&language=nl&region=nl';
+	$resp = wp_remote_get( $url, [ 'timeout' => 8 ] );
+	if ( is_wp_error( $resp ) ) return [];
+	$data = json_decode( wp_remote_retrieve_body( $resp ), true );
+	if ( empty( $data['results'][0] ) ) return [];
+	$r     = $data['results'][0];
+	$lat   = $r['geometry']['location']['lat'] ?? null;
+	$lon   = $r['geometry']['location']['lng'] ?? null;
+	$comps = $r['address_components'] ?? [];
+	$route = $number = $stad = '';
+	foreach ( $comps as $c ) {
+		$types = $c['types'] ?? [];
+		if ( in_array( 'route', $types, true ) )         $route  = $c['long_name'];
+		if ( in_array( 'street_number', $types, true ) ) $number = $c['long_name'];
+		if ( in_array( 'locality', $types, true ) )      $stad   = $c['long_name'];
+		if ( in_array( 'administrative_area_level_2', $types, true ) && ! $stad ) $stad = $c['long_name'];
+	}
+	$straat  = trim( $route . ( $number ? ' ' . $number : '' ) );
+	$display = trim( ( $straat ? $straat . ', ' : '' ) . $stad ) ?: ( $r['formatted_address'] ?? '' );
+	return [ 'lat' => $lat, 'lon' => $lon, 'straat' => $straat, 'stad' => $stad, 'display' => $display ];
+}
+
+// ── Google Reverse Geocoding: coordinaten -> adres ────────────────────────────
+function snd_tg_reverse_geocode( float $lat, float $lon ): array {
+	$api_key = get_option( 'snd_google_maps_api_key', '' );
+	if ( empty( $api_key ) ) return [ 'display' => round( $lat, 4 ) . ', ' . round( $lon, 4 ) ];
+	$url  = 'https://maps.googleapis.com/maps/api/geocode/json?latlng=' . $lat . ',' . $lon . '&key=' . $api_key . '&language=nl&region=nl';
+	$resp = wp_remote_get( $url, [ 'timeout' => 8 ] );
+	if ( is_wp_error( $resp ) ) return [ 'display' => round( $lat, 4 ) . ', ' . round( $lon, 4 ) ];
+	$data = json_decode( wp_remote_retrieve_body( $resp ), true );
+	if ( empty( $data['results'][0] ) ) return [ 'display' => round( $lat, 4 ) . ', ' . round( $lon, 4 ) ];
+	$r     = $data['results'][0];
+	$comps = $r['address_components'] ?? [];
+	$route = $number = $stad = '';
+	foreach ( $comps as $c ) {
+		$types = $c['types'] ?? [];
+		if ( in_array( 'route', $types, true ) )         $route  = $c['long_name'];
+		if ( in_array( 'street_number', $types, true ) ) $number = $c['long_name'];
+		if ( in_array( 'locality', $types, true ) )      $stad   = $c['long_name'];
+		if ( in_array( 'administrative_area_level_2', $types, true ) && ! $stad ) $stad = $c['long_name'];
+	}
+	$straat  = trim( $route . ( $number ? ' ' . $number : '' ) );
+	$display = trim( ( $straat ? $straat . ', ' : '' ) . $stad ) ?: ( $r['formatted_address'] ?? round( $lat, 4 ) . ', ' . round( $lon, 4 ) );
+	return [ 'straat' => $straat, 'stad' => $stad, 'display' => $display ];
+}
+
+// ── Categorie-selectie keyboard ───────────────────────────────────────────────
+// Categorie-paginering (8 per pagina)
+function snd_tg_category_keyboard( array $cats, array $selected_ids, string $sess_key, int $page = 0 ): array {
+	$per_page = 8;
+	$total    = count( $cats );
+	$pages    = max( 1, (int) ceil( $total / $per_page ) );
+	$page     = max( 0, min( $page, $pages - 1 ) );
+	$slice    = array_slice( $cats, $page * $per_page, $per_page );
+
+	$keyboard = [];
+	foreach ( $slice as $cat ) {
+		$is_on    = in_array( $cat->term_id, $selected_ids, true );
+		$label    = ( $is_on ? '✅ ' : '☐ ' ) . mb_substr( $cat->name, 0, 26 );
+		$keyboard[] = [ [ 'text' => $label, 'callback_data' => 'tgnew:cat:' . $cat->term_id . ':' . $page ] ];
+	}
+
+	// Navigatierij ◀ ▶
+	$nav = [];
+	if ( $page > 0 )         $nav[] = [ 'text' => '◀ Vorige',   'callback_data' => 'tgnew:catpage:' . ( $page - 1 ) ];
+	if ( $page < $pages - 1 ) $nav[] = [ 'text' => 'Volgende ▶', 'callback_data' => 'tgnew:catpage:' . ( $page + 1 ) ];
+	if ( $nav ) $keyboard[] = $nav;
+
+	// Bevestig/overslaan knop
+	$count = count( $selected_ids );
+	$lbl   = $count > 0
+		? "✅ Bevestigen ({$count}) — p." . ( $page + 1 ) . "/{$pages}"
+		: "⏭ Overslaan — p." . ( $page + 1 ) . "/{$pages}";
+	$keyboard[] = [ [ 'text' => $lbl, 'callback_data' => 'tgnew:catdone:0' ] ];
+	return $keyboard;
+}
+
+// ── Maak WP-bericht aan na nieuw-bericht flow ────────────────────────────────
+function snd_tg_new_post_create( array $sess, string $chat_id, string $token, string $sess_key ): void {
+	delete_transient( $sess_key );
+
+	$title      = sanitize_text_field( $sess['title']  ?? 'Incident ' . wp_date( 'd-m H:i' ) );
+	$body       = wp_kses_post( $sess['body']   ?? '' );
+	$lat        = isset( $sess['lat'] ) ? (float) $sess['lat'] : null;
+	$lon        = isset( $sess['lon'] ) ? (float) $sess['lon'] : null;
+	$straat     = sanitize_text_field( $sess['straat'] ?? '' );
+	$stad       = sanitize_text_field( $sess['stad']   ?? '' );
+	$status     = sanitize_text_field( $sess['status'] ?? '' );
+	$byline     = sanitize_text_field( $sess['byline'] ?? '' );
+	$attach_ids = array_filter( array_map( 'intval', explode( ',', $sess['attach_ids'] ?? '' ) ) );
+	$categories = array_filter( array_map( 'intval', (array) ( $sess['categories'] ?? [] ) ) );
+	$tags_raw   = sanitize_text_field( $sess['tags'] ?? '' );
+
+	// ── Vind of maak de "Redactie" auteur ────────────────────────────────────
+	$author_id  = 0;
+	$redactie   = get_user_by( 'login', 'redactie' );
+	if ( ! $redactie ) $redactie = get_user_by( 'slug', 'redactie' );
+	if ( ! $redactie ) {
+		// Zoek op display name
+		$users = get_users( [ 'search' => 'Redactie', 'search_columns' => [ 'display_name' ], 'number' => 1 ] );
+		if ( $users ) $redactie = $users[0];
+	}
+	if ( $redactie ) {
+		$author_id = $redactie->ID;
+	} else {
+		// Maak Redactie-gebruiker aan als die niet bestaat
+		$author_id = wp_insert_user( [
+			'user_login'   => 'redactie',
+			'user_pass'    => wp_generate_password( 24, true ),
+			'display_name' => 'Redactie',
+			'role'         => 'author',
+		] );
+		if ( is_wp_error( $author_id ) ) $author_id = 0;
+	}
+	// Als er geen geldige author is (bijv. REST zonder auth), gebruik de eerste admin
+	if ( ! $author_id ) {
+		$admins = get_users( [ 'role' => 'administrator', 'number' => 1, 'orderby' => 'ID', 'order' => 'ASC' ] );
+		$author_id = $admins ? $admins[0]->ID : 1;
+	}
+
+	// ── Publiceer het bericht ─────────────────────────────────────────────────
+	$post_args = [
+		'post_title'    => $title,
+		'post_content'  => wpautop( $body ),
+		'post_status'   => 'publish',
+		'post_type'     => 'post',
+		'post_author'   => $author_id,
+	];
+	if ( ! empty( $categories ) ) {
+		$post_args['post_category'] = $categories;
+	}
+
+	$post_id = wp_insert_post( $post_args, true ); // true = return WP_Error on failure
+
+	if ( is_wp_error( $post_id ) ) {
+		snd_tg_send_msg( $token, $chat_id, '❌ Bericht aanmaken mislukt: ' . $post_id->get_error_message() . ' (code: ' . $post_id->get_error_code() . ')' );
+		return;
+	}
+	if ( ! $post_id ) {
+		snd_tg_send_msg( $token, $chat_id, '❌ Bericht aanmaken mislukt: wp_insert_post gaf 0 terug. Controleer of de auteur (ID: ' . $author_id . ') bestaat.' );
+		return;
+	}
+
+	// ── Tags instellen ────────────────────────────────────────────────────────
+	if ( ! empty( $tags_raw ) ) {
+		$tag_list = array_map( 'trim', explode( ',', $tags_raw ) );
+		$tag_list = array_filter( $tag_list );
+		if ( ! empty( $tag_list ) ) {
+			wp_set_post_tags( $post_id, $tag_list, false );
+		}
+	}
+
+	// ── Post meta ─────────────────────────────────────────────────────────────
+	if ( $lat )    update_post_meta( $post_id, '_snd_lat', $lat );
+	if ( $lon )    update_post_meta( $post_id, '_snd_lon', $lon );
+	if ( $straat ) update_post_meta( $post_id, '_snd_street1', $straat );
+	if ( $stad )   update_post_meta( $post_id, '_snd_street2', $stad );
+	if ( $status ) {
+		update_post_meta( $post_id, '_snd_incident_status', $status );
+		$times = get_post_meta( $post_id, '_snd_status_times', true );
+		if ( ! is_array( $times ) ) $times = [];
+		$times[ $status ] = time();
+		update_post_meta( $post_id, '_snd_status_times', $times );
+	}
+	if ( $byline ) update_post_meta( $post_id, '_snd_byline', $byline );
+	update_post_meta( $post_id, '_snd_is_live_story', '1' );
+
+	if ( ! empty( $attach_ids ) ) {
+		update_post_meta( $post_id, '_snd_press_photos', implode( ',', $attach_ids ) );
+		set_post_thumbnail( $post_id, reset( $attach_ids ) );
+	}
+
+	// ── Bevestigingsbericht ───────────────────────────────────────────────────
+	$edit_url   = admin_url( 'post.php?post=' . $post_id . '&action=edit' );
+	$pub_url    = get_permalink( $post_id );
+	$loc_str    = trim( ( $straat ? $straat . ', ' : '' ) . $stad );
+	$status_lbl = $status === 'onderweg' ? '🚨 Onderweg' : ( $status === 'ter_plaatse' ? '📍 Ter plaatse' : '' );
+	$foto_count = count( $attach_ids );
+
+	// Categorienamen ophalen
+	$cat_namen = [];
+	foreach ( $categories as $cid ) {
+		$cat = get_category( $cid );
+		if ( $cat && ! is_wp_error( $cat ) ) $cat_namen[] = $cat->name;
+	}
+
+	$msg = "✅ *Gepubliceerd op de website!*\n\n"
+		. "📰 *{$title}*\n"
+		. "✍️ Auteur: Redactie\n"
+		. ( $loc_str       ? "📍 {$loc_str}\n"                        : '' )
+		. ( $status_lbl    ? "{$status_lbl}\n"                         : '' )
+		. ( $byline        ? "📷 {$byline}\n"                          : '' )
+		. ( $cat_namen     ? "🗂 " . implode( ', ', $cat_namen ) . "\n" : '' )
+		. ( $tags_raw      ? "🏷 {$tags_raw}\n"                        : '' )
+		. ( $foto_count    ? "🖼 {$foto_count} foto('s)\n"             : '' )
+		. "\n🌐 " . $pub_url
+		. "\n✏️ " . $edit_url
+		. "\n\nWil je dit bericht nu direct naar alle media versturen?";
+
+	$keyboard = [ [
+		[ 'text' => '📨 Versturen (selecteer ontvangers)', 'callback_data' => 'tgnew:selectrcpt:' . $post_id ],
+		[ 'text' => '✅ Nee, later',                       'callback_data' => 'tgnew:dispatch:0' ],
+	] ];
+	snd_tg_send_msg( $token, $chat_id, $msg, $keyboard );
+}
+
+// ── Bouw outlet-selectie keyboard voor initieel versturen ────────────────────
+function snd_tg_build_dispatch_keyboard( int $post_id, array $all, array $selected, array $outlets ): array {
+	$keyboard = [];
+	foreach ( $all as $email ) {
+		$name = $email;
+		foreach ( $outlets as $o ) {
+			if ( strtolower( $o['email'] ) === strtolower( $email ) ) { $name = $o['name']; break; }
+		}
+		$is_on    = in_array( $email, $selected, true );
+		$label    = ( $is_on ? '✅ ' : '☐ ' ) . mb_substr( $name, 0, 28 );
+		$keyboard[] = [ [ 'text' => $label, 'callback_data' => 'tgnew:rcptd:' . $post_id . ':' . $email ] ];
+	}
+	$count = count( $selected );
+	$keyboard[] = [ [
+		'text'          => "📨 Verstuur naar {$count} ontvanger(s)",
+		'callback_data' => 'tgnew:sendd:' . $post_id,
+	] ];
+	$keyboard[] = [ [
+		'text'          => '❌ Annuleren',
+		'callback_data' => 'tgnew:dispatch:0',
+	] ];
+	return $keyboard;
+}
+
+// ── Verstuur persbericht naar een geselecteerde lijst outlets ────────────────
+function snd_tg_do_dispatch_email( int $post_id, array $selected_emails ): int {
+	$post = get_post( $post_id );
+	if ( ! $post ) return 0;
+	$outlets      = get_option( 'snd_media_outlets_v4', [] );
+	$from_name    = get_option( 'snd_email_from_name', get_bloginfo( 'name' ) );
+	$from_email   = get_option( 'snd_email_from_email', get_bloginfo( 'admin_email' ) );
+	$site_name    = get_bloginfo( 'name' );
+	$accent_color = get_option( 'snd_email_accent_color', '#3b82f6' );
+	$sent         = 0;
+	foreach ( $outlets as $o ) {
+		if ( empty( $o['email'] ) || empty( $o['access_code'] ) ) continue;
+		if ( ! in_array( strtolower( $o['email'] ), array_map( 'strtolower', $selected_emails ), true ) ) continue;
+		$outlet      = $o; // template verwacht $outlet, niet $o
+		$portal_url  = home_url( '/persportaal/?access_code=' . rawurlencode( $o['access_code'] ) );
+		$custom_note = $o['custom_email_note'] ?? '';
+		ob_start();
+		$tpl = SND_PLUGIN_PATH . 'templates/email-template.php';
+		if ( file_exists( $tpl ) ) include $tpl;
+		$html_body = ob_get_clean();
+		if ( empty( trim( $html_body ) ) ) continue;
+		$ok = wp_mail( $o['email'], $post->post_title, $html_body,
+			[ 'Content-Type: text/html; charset=UTF-8', "From: {$from_name} <{$from_email}>" ] );
+		if ( $ok ) {
+			$sent++;
+			$log = get_post_meta( $post_id, '_snd_dispatch_log', true );
+			if ( ! is_array( $log ) ) $log = [];
+			$log[ $o['email'] ] = [ 'name' => $o['name'], 'email' => $o['email'], 'timestamp' => time() ];
+			update_post_meta( $post_id, '_snd_dispatch_log', $log );
+		}
+	}
+	return $sent;
+}
+
+// ── Short human-readable ID ───────────────────────────────────────────────────
+function snd_tg_get_short_id( string $full_id, array &$active ): string {
+	// If already assigned, return it
+	if ( ! empty( $active[ $full_id ]['_sid'] ) ) return $active[ $full_id ]['_sid'];
+	// Find next available number
+	$used = [];
+	foreach ( $active as $item ) {
+		if ( ! empty( $item['_sid'] ) ) $used[] = $item['_sid'];
+	}
+	$i = 1;
+	while ( in_array( 'm' . str_pad( $i, 2, '0', STR_PAD_LEFT ), $used, true ) ) $i++;
+	$sid = 'm' . str_pad( $i, 2, '0', STR_PAD_LEFT );
+	$active[ $full_id ]['_sid'] = $sid;
+	return $sid;
+}
+
+// Assign short IDs to all items that don't have one yet
+function snd_tg_ensure_sids( array &$active ): void {
+	foreach ( array_keys( $active ) as $full_id ) {
+		snd_tg_get_short_id( $full_id, $active );
+	}
+}
+
+// Find full ID by short ID (m01) or partial match of full ID
+function snd_tg_find( array $active, string $query ): ?string {
+	$query = strtolower( trim( $query ) );
+	if ( empty( $query ) ) return null;
+
+	// Exact match on short ID
+	foreach ( $active as $full_id => $item ) {
+		if ( strtolower( $item['_sid'] ?? '' ) === $query ) return $full_id;
+	}
+	// Exact full ID match
+	if ( isset( $active[ $query ] ) ) return $query;
+	// Suffix match on full ID (legacy)
+	foreach ( array_keys( $active ) as $full_id ) {
+		if ( substr( strtolower( $full_id ), -strlen( $query ) ) === $query ) return $full_id;
+	}
+	return null;
+}
+
+// ── Inline keyboard callback ──────────────────────────────────────────────────
+function snd_tg_handle_callback( array $cq, string $token ) {
+	$cq_id     = $cq['id'] ?? '';
+	$chat_id   = (string) ( $cq['message']['chat']['id'] ?? '' );
+	$tg_msg_id = (int)    ( $cq['message']['message_id'] ?? 0 );
+	$data      = $cq['data'] ?? '';
+
+	// Naam ophalen voor logging
+	$cb_name = snd_tg_resolve_name( $chat_id );
+
+	// Answer immediately to remove spinner
+	wp_remote_post( 'https://api.telegram.org/bot' . $token . '/answerCallbackQuery', [
+		'timeout' => 4, 'body' => [ 'callback_query_id' => $cq_id ],
+	] );
+
+	// ── Goedkeuring / afwijzing door eigenaar ────────────────────────────────
+	if ( preg_match( '/^tg(approve|deny):(.+)$/', $data, $am ) ) {
+		$decision = $am[1]; // 'approve' of 'deny'
+		$req_key  = $am[2];
+		if ( $chat_id !== SND_OWNER_CHAT_ID ) {
+			snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '❌ Alleen de eigenaar kan goedkeuren.', null );
+			return;
+		}
+		$req = get_transient( $req_key );
+		if ( ! is_array( $req ) ) {
+			snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏰ Verzoek verlopen of al verwerkt.', null );
+			return;
+		}
+		delete_transient( $req_key );
+
+		$requester = $req['requester_chat_id'];
+		$req_name  = $req['requester_name'];
+		$post_id   = (int) $req['post_id'];
+		$emails    = $req['selected_emails'] ?? [];
+
+		if ( $decision === 'approve' ) {
+			snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+				"✅ Goedgekeurd — e-mails worden verstuurd naar *" . count( $emails ) . "* outlet(s).", null );
+			// Verstuur
+			$sent = snd_tg_do_dispatch_email( $post_id, $emails );
+			snd_tg_log( $chat_id, $cb_name, 'goedkeuring_verleend', "post #{$post_id} → {$req_name}" );
+			// Vertel aanvrager
+			snd_tg_send_msg( $token, $requester,
+				"✅ *{$cb_name}* heeft je verzoek *goedgekeurd*!\n{$sent} e-mail(s) verstuurd naar " . get_the_title( $post_id ) . "." );
+		} else {
+			snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+				"❌ Afgewezen — geen e-mails verstuurd.", null );
+			snd_tg_log( $chat_id, $cb_name, 'goedkeuring_afgewezen', "post #{$post_id} → {$req_name}" );
+			// Voeg twee knoppen toe: alsnog andere outlets kiezen of annuleren
+			$outlets  = get_option( 'snd_media_outlets_v4', [] );
+			$all_emails = array_values( array_filter( array_map( function( $o ) {
+				return ! empty( $o['email'] ) && ! empty( $o['access_code'] ) ? $o['email'] : null;
+			}, $outlets ) ) );
+			$keyboard = [
+				[ [ 'text' => '📨 Toch versturen (andere selectie)', 'callback_data' => 'tgnew:selectrcpt:' . $post_id ] ],
+				[ [ 'text' => '✅ Annuleren',                        'callback_data' => 'tgnew:dispatch:0' ] ],
+			];
+			snd_tg_send_msg( $token, $requester,
+				"❌ *{$cb_name}* heeft je verzoek *afgewezen*.\n\nWil je het toch versturen of annuleren?",
+				$keyboard );
+		}
+		return;
+	}
+
+	if ( ! preg_match( '/^(sel|all|none|send|cancel):([^:]+)(?::(.*))?$/', $data, $m ) ) {
+		// ── Foto-koppeling callback (enkelvoudig of groep) ────────────────────
+		if ( preg_match( '/^tgphotos?:(\d+):(.+)$/', $data, $pm ) ) {
+			$post_id    = (int) $pm[1];
+			$attach_ids = array_filter( array_map( 'intval', explode( ',', $pm[2] ) ) );
+
+			if ( $post_id > 0 && ! empty( $attach_ids ) ) {
+				$existing = get_post_meta( $post_id, '_snd_press_photos', true );
+				$ids      = ! empty( $existing ) ? array_filter( explode( ',', $existing ) ) : [];
+				$added    = 0;
+				foreach ( $attach_ids as $aid ) {
+					if ( ! in_array( (string) $aid, $ids, true ) ) {
+						$ids[] = (string) $aid;
+						$added++;
+					}
+				}
+				update_post_meta( $post_id, '_snd_press_photos', implode( ',', $ids ) );
+				if ( ! has_post_thumbnail( $post_id ) && ! empty( $attach_ids ) ) {
+					set_post_thumbnail( $post_id, reset( $attach_ids ) );
+				}
+				$post_title = get_the_title( $post_id );
+				$foto_tekst = $added === 1 ? '1 foto' : "{$added} foto's";
+
+				// Bied aan om direct een update mail te sturen
+				$keyboard = [ [
+					[ 'text' => '📢 Update mail versturen', 'callback_data' => 'tgupdate:start:' . $post_id ],
+					[ 'text' => '✅ Klaar',                 'callback_data' => 'tgupdate:skip:'  . $post_id ],
+				] ];
+				snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+					"✅ {$foto_tekst} gekoppeld aan *{$post_title}*\n📷 Beschikbaar in het persportaal.\n\nWil je ook een update mail sturen?",
+					$keyboard );
+			} else {
+				$count      = count( $attach_ids );
+				$foto_tekst = $count === 1 ? '1 foto' : "{$count} foto's";
+				snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+					"✅ {$foto_tekst} opgeslagen maar niet gekoppeld.", null );
+			}
+		}
+
+		// ── Nieuw bericht aanmaken — status callback ────────────────────────
+		if ( preg_match( '/^tgnew:(status|dispatch|selectrcpt|rcptd|sendd|cat|catpage|catdone):(.*)$/', $data, $nm ) ) {
+			$naction  = $nm[1];
+			$nval     = $nm[2];
+			$sess_key = 'snd_tg_upd_' . $chat_id;
+			$sess     = get_transient( $sess_key );
+
+			if ( $naction === 'status' ) {
+				if ( ! is_array( $sess ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏰ Sessie verlopen. Stuur /annuleer en probeer opnieuw.', null );
+				} else {
+					$sess['status'] = $nval === 'none' ? '' : $nval;
+					$sess['step']   = 'new_byline';
+					set_transient( $sess_key, $sess, 600 );
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"✅ Status opgeslagen.\n\nTyp de *naam van de fotograaf* (naamsvermelding bij foto's), of stuur `/overslaan`:",
+						null );
+				}
+
+			} elseif ( $naction === 'cat' ) {
+				// Toggle een categorie aan/uit — nval = "term_id:page"
+				$parts  = explode( ':', $nval, 2 );
+				$cat_id = (int) $parts[0];
+				$page   = isset( $parts[1] ) ? (int) $parts[1] : 0;
+				$sess_key = 'snd_tg_upd_' . $chat_id;
+				$sess     = get_transient( $sess_key );
+				if ( ! is_array( $sess ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏰ Sessie verlopen.', null );
+				} else {
+					$sel = $sess['categories'] ?? [];
+					$idx = array_search( $cat_id, $sel, true );
+					if ( $idx !== false ) { array_splice( $sel, $idx, 1 ); }
+					else { $sel[] = $cat_id; }
+					$sess['categories'] = $sel;
+					set_transient( $sess_key, $sess, 600 );
+					$cats     = get_categories( [ 'hide_empty' => false, 'orderby' => 'name', 'order' => 'ASC' ] );
+					$keyboard = snd_tg_category_keyboard( $cats, $sel, $sess_key, $page );
+					$count    = count( $sel );
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"🗂 *Categorieën selecteren* ({$count} geselecteerd):", $keyboard );
+				}
+
+			} elseif ( $naction === 'catpage' ) {
+				// Blader naar andere pagina
+				$page     = (int) $nval;
+				$sess_key = 'snd_tg_upd_' . $chat_id;
+				$sess     = get_transient( $sess_key );
+				$sel      = is_array( $sess ) ? ( $sess['categories'] ?? [] ) : [];
+				$cats     = get_categories( [ 'hide_empty' => false, 'orderby' => 'name', 'order' => 'ASC' ] );
+				$keyboard = snd_tg_category_keyboard( $cats, $sel, $sess_key, $page );
+				$count    = count( $sel );
+				snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+					"🗂 *Categorieën selecteren* ({$count} geselecteerd):", $keyboard );
+
+			} elseif ( $naction === 'catdone' ) {
+				// Bevestig categorieselectie → vraag tags
+				$sess_key = 'snd_tg_upd_' . $chat_id;
+				$sess     = get_transient( $sess_key );
+				if ( ! is_array( $sess ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏰ Sessie verlopen.', null );
+				} else {
+					$count_sel = count( $sess['categories'] ?? [] );
+					$sess['step'] = 'new_tags';
+					set_transient( $sess_key, $sess, 600 );
+					$confirm = $count_sel > 0 ? "✅ {$count_sel} categorie(ën) geselecteerd." : "⏭ Geen categorie geselecteerd.";
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"{$confirm}\n\nTyp *tags* voor dit bericht (komma-gescheiden, bijv. `brand, tilburg, hulpdiensten`)\nOf stuur `/overslaan`:",
+						null );
+				}
+
+
+			} elseif ( $naction === 'selectrcpt' ) {
+			
+				// Toon outlet-keuzescherm (allemaal standaard aan)
+				$post_id = (int) $nval;
+				$outlets = get_option( 'snd_media_outlets_v4', [] );
+				$all     = array_values( array_filter( array_map( function( $o ) {
+					return ! empty( $o['email'] ) && ! empty( $o['access_code'] ) ? $o['email'] : null;
+				}, $outlets ) ) );
+				if ( empty( $all ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '❌ Geen outlets geconfigureerd.', null );
+				} else {
+					$sess_key = 'snd_tg_upd_' . $chat_id;
+					set_transient( $sess_key, [
+						'step'     => 'dispatch_rcpt',
+						'post_id'  => $post_id,
+						'all'      => $all,
+						'selected' => [],
+					], 600 );
+					$keyboard = snd_tg_build_dispatch_keyboard( $post_id, $all, [], $outlets );
+					$post_title = get_the_title( $post_id );
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"📨 *Versturen — {$post_title}*\n\nSelecteer ontvangers (✅ = geselecteerd):",
+						$keyboard );
+				}
+
+			} elseif ( $naction === 'rcptd' ) {
+				// Toggle één outlet aan/uit
+				$post_id  = (int) strtok( $nval, ':' );
+				$email    = substr( $nval, strlen( (string) $post_id ) + 1 );
+				$sess_key = 'snd_tg_upd_' . $chat_id;
+				$sess     = get_transient( $sess_key );
+				if ( ! is_array( $sess ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏰ Sessie verlopen.', null );
+				} else {
+					$selected = $sess['selected'] ?? [];
+					$idx      = array_search( $email, $selected, true );
+					if ( $idx !== false ) { array_splice( $selected, $idx, 1 ); }
+					else { $selected[] = $email; }
+					$sess['selected'] = $selected;
+					set_transient( $sess_key, $sess, 600 );
+					$outlets  = get_option( 'snd_media_outlets_v4', [] );
+					$keyboard = snd_tg_build_dispatch_keyboard( $post_id, $sess['all'] ?? [], $selected, $outlets );
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"📨 *Ontvangers selecteren* (" . count( $selected ) . " geselecteerd):",
+						$keyboard );
+				}
+
+			} elseif ( $naction === 'sendd' ) {
+				// Verstuur naar geselecteerde outlets — check rechten + goedkeuring
+				$post_id  = (int) $nval;
+				$sess_key = 'snd_tg_upd_' . $chat_id;
+				$sess     = get_transient( $sess_key );
+				delete_transient( $sess_key );
+				$selected = is_array( $sess ) ? ( $sess['selected'] ?? [] ) : [];
+
+				if ( empty( $selected ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '❌ Geen ontvangers geselecteerd.', null );
+				} elseif ( ! snd_tg_can( $chat_id, 'dispatch' ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '🚫 Je hebt geen toestemming om e-mails te versturen.', null );
+					snd_tg_log( $chat_id, $cb_name, 'geblokkeerd_dispatch', get_the_title( $post_id ) );
+				} else {
+					// Filter op toegestane outlets
+					$allowed_e = snd_tg_allowed_outlets( $chat_id );
+					if ( ! empty( $allowed_e ) ) {
+						$selected = array_values( array_filter( $selected, function( $e ) use ( $allowed_e ) {
+							return in_array( strtolower( $e ), array_map( 'strtolower', $allowed_e ), true );
+						} ) );
+					}
+					if ( empty( $selected ) ) {
+						snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '🚫 Je hebt geen toegang tot de geselecteerde outlets.', null );
+					} elseif ( snd_tg_needs_approval( $chat_id ) ) {
+						snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏳ Goedkeuring aangevraagd bij de eigenaarâ¦', null );
+						snd_tg_log( $chat_id, $cb_name, 'goedkeuring_aangevraagd', get_the_title( $post_id ) . ' → ' . count( $selected ) . ' outlets' );
+						snd_tg_request_approval( $token, $chat_id, $cb_name, 'Persbericht versturen naar ' . count( $selected ) . ' outlet(s)', 'dispatch', $post_id, $selected );
+					} else {
+						$sent = snd_tg_do_dispatch_email( $post_id, $selected );
+						snd_tg_log( $chat_id, $cb_name, 'verstuurd', get_the_title( $post_id ) . " → {$sent} outlets" );
+						$msg  = $sent > 0
+							? "✅ Bericht verstuurd naar *{$sent}* outlet(s)!"
+							: '❌ Versturen mislukt. Controleer e-mailinstellingen en outlet access_codes.';
+						snd_tg_edit_message( $token, $chat_id, $tg_msg_id, $msg, null );
+					}
+				}
+
+			} elseif ( $naction === 'dispatch' ) {
+				// dispatch:0 = niet versturen (afvangen hierboven al, maar voor zekerheid)
+				snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+					'✅ Bericht gepubliceerd. Je kunt het later versturen via het dashboard.', null );
+			}
+			return;
+		}
+
+		// ── Update mail flow ──────────────────────────────────────────────────
+		if ( preg_match( '/^tgupdate:(start|skip|rcpt|allrcpt):(\d+)(?::(.*))?$/', $data, $um ) ) {
+			$action     = $um[1];
+			$post_id    = (int) $um[2];
+			$extra      = $um[3] ?? '';
+			$sess_key   = 'snd_tg_upd_' . $chat_id;
+
+			if ( $action === 'skip' ) {
+				delete_transient( $sess_key );
+				snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '✅ Klaar! Geen update mail verstuurd.', null );
+
+			} elseif ( $action === 'start' ) {
+				// Stap 1: toon lijst van ontvangers om uit te kiezen
+				$dispatch_log = get_post_meta( $post_id, '_snd_dispatch_log', true );
+				if ( ! is_array( $dispatch_log ) || empty( $dispatch_log ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						'❌ Geen ontvangers gevonden voor dit bericht.', null );
+				} else {
+					// Sla sessie op met alle ontvangers, geselecteerd = allen standaard
+					$all_emails = array_keys( $dispatch_log );
+					$outlets    = get_option( 'snd_media_outlets_v4', [] );
+					set_transient( $sess_key, [
+						'step'      => 'recipients',
+						'post_id'   => $post_id,
+						'all'       => $all_emails,
+						'selected'  => $all_emails, // standaard allemaal aan
+					], 600 );
+
+					$keyboard = snd_tg_build_recipient_keyboard( $all_emails, $all_emails, $post_id, $outlets );
+					$post_title = get_the_title( $post_id );
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"📢 *Update mail — {$post_title}*\n\nSelecteer de ontvangers (✅ = geselecteerd)\nKlik op een naam om te deselecteren:",
+						$keyboard );
+				}
+
+			} elseif ( $action === 'rcpt' ) {
+				// Toggle één ontvanger aan/uit
+				$sess = get_transient( $sess_key );
+				if ( ! is_array( $sess ) ) { snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏰ Sessie verlopen.', null ); }
+				else {
+					$email    = $extra;
+					$selected = $sess['selected'] ?? [];
+					$idx      = array_search( $email, $selected, true );
+					if ( $idx !== false ) {
+						array_splice( $selected, $idx, 1 );
+					} else {
+						$selected[] = $email;
+					}
+					$sess['selected'] = $selected;
+					set_transient( $sess_key, $sess, 600 );
+
+					$outlets  = get_option( 'snd_media_outlets_v4', [] );
+					$keyboard = snd_tg_build_recipient_keyboard( $sess['all'] ?? [], $selected, $post_id, $outlets );
+					$count    = count( $selected );
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"📢 *Ontvangers selecteren* ({$count} geselecteerd)\nKlik op een naam om te togglen:",
+						$keyboard );
+				}
+
+			} elseif ( $action === 'allrcpt' ) {
+				// Bevestig selectie → ga door naar onderwerp vragen
+				$sess = get_transient( $sess_key );
+				if ( ! is_array( $sess ) || empty( $sess['selected'] ) ) {
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '❌ Selecteer minstens één ontvanger.', null );
+				} else {
+					$sess['step'] = 'subject';
+					set_transient( $sess_key, $sess, 600 );
+					$count = count( $sess['selected'] );
+					snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+						"✅ *{$count} ontvanger(s) geselecteerd.*\n\nStuur nu het *onderwerp* van de update:", null );
+				}
+			}
+		}
+
+		// ── Nieuw bericht aanmaken — foto-callback ──────────────────────────
+		if ( strncmp( $data, 'tgnewpost:', 10 ) === 0 ) {
+			$id_str   = substr( $data, 10 );
+			$sess_key = 'snd_tg_upd_' . $chat_id;
+			set_transient( $sess_key, [ 'step' => 'new_title', 'attach_ids' => $id_str ], 600 );
+			snd_tg_edit_message( $token, $chat_id, $tg_msg_id,
+				"📝 *Nieuw bericht aanmaken*\n\nTyp de *titel* van het bericht:", null );
+			return;
+		}
+
+
+		return;
+	}
+	[ , $action, $sess_id, $payload ] = $m;
+	$payload = $payload ?? '';
+
+	$state_key = 'snd_tg_sess_' . $sess_id;
+	$state     = get_option( $state_key );
+	if ( ! is_array( $state ) ) {
+		snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '⏰ Sessie verlopen. Stuur het commando opnieuw.', null );
+		return;
+	}
+
+	$outlets = get_option( 'snd_media_outlets_v4', [] );
+
+	if ( $action === 'cancel' ) {
+		delete_option( $state_key );
+		snd_tg_edit_message( $token, $chat_id, $tg_msg_id, '❌ Geannuleerd.', null );
+		return;
+	}
+
+	if ( $action === 'sel' ) {
+		// payload = hashed email key
+		$hash = $payload;
+		if ( isset( $state['selected'][ $hash ] ) ) {
+			$state['selected'][ $hash ]['on'] = ! $state['selected'][ $hash ]['on'];
+			update_option( $state_key, $state );
+		}
+	} elseif ( $action === 'all' ) {
+		foreach ( $state['selected'] as $h => $v ) $state['selected'][ $h ]['on'] = true;
+		update_option( $state_key, $state );
+	} elseif ( $action === 'none' ) {
+		foreach ( $state['selected'] as $h => $v ) $state['selected'][ $h ]['on'] = false;
+		update_option( $state_key, $state );
+	} elseif ( $action === 'send' ) {
+		$to_send = [];
+		foreach ( $state['selected'] as $h => $v ) {
+			if ( $v['on'] ) $to_send[] = $v['email'];
+		}
+		delete_option( $state_key );
+		$sent  = snd_tg_do_status_email( $state['status'], $state['item'], $to_send );
+		$icon  = $state['status'] === 'onderweg' ? '🚨' : '📍';
+		$label = $state['status'] === 'onderweg' ? 'Fotograaf onderweg' : 'Fotograaf ter plaatse';
+		$text  = "{$icon} *{$label}* ingesteld"
+			. ( $sent > 0 ? "\n✉️ E-mail verstuurd naar {$sent} outlet(s)" : "\n📭 Geen e-mail verstuurd" );
+		snd_tg_edit_message( $token, $chat_id, $tg_msg_id, $text, null );
+		return;
+	}
+
+	// Re-render keyboard
+	$icon  = $state['status'] === 'onderweg' ? '🚨' : '📍';
+	$label = $state['status'] === 'onderweg' ? 'Fotograaf onderweg' : 'Fotograaf ter plaatse';
+	$cnt   = count( array_filter( array_column( $state['selected'], 'on' ) ) );
+	$header = "{$icon} *{$label}*\n_{$state['item']['tekst']}_\n\nKies ontvangers ({$cnt} geselecteerd):";
+	snd_tg_edit_message( $token, $chat_id, $tg_msg_id, $header,
+		snd_tg_outlet_keyboard( $sess_id, $state['selected'] ) );
+}
+
+// ── Build outlet keyboard ─────────────────────────────────────────────────────
+// Selected is now: [ hash => ['email'=>'...', 'name'=>'...', 'on'=>bool] ]
+function snd_tg_outlet_keyboard( string $sess_id, array $selected ): array {
+	$rows = [];
+	foreach ( $selected as $hash => $v ) {
+		$label  = ( $v['on'] ? '✅ ' : '☐ ' ) . mb_substr( $v['name'], 0, 25 );
+		// callback_data max 64 bytes: "sel:SESSID:HASH" = 4+10+1+8 = 23 bytes, safe
+		$rows[] = [ [ 'text' => $label, 'callback_data' => 'sel:' . $sess_id . ':' . $hash ] ];
+	}
+	$cnt    = count( array_filter( array_column( $selected, 'on' ) ) );
+	$rows[] = [
+		[ 'text' => '✅ Alles', 'callback_data' => 'all:' . $sess_id ],
+		[ 'text' => '☐ Niets', 'callback_data' => 'none:' . $sess_id ],
+	];
+	$rows[] = [
+		[ 'text' => "📨 Verstuur ({$cnt})", 'callback_data' => 'send:' . $sess_id ],
+		[ 'text' => '❌ Annuleer',          'callback_data' => 'cancel:' . $sess_id ],
+	];
+	return $rows;
+}
+
+// Build selected map from outlets list
+function snd_tg_build_selected( array $outlets ): array {
+	$selected = [];
+	foreach ( $outlets as $o ) {
+		if ( empty( $o['email'] ) || empty( $o['access_code'] ) ) continue;
+		$hash = substr( md5( $o['email'] ), 0, 8 );
+		$selected[ $hash ] = [ 'email' => $o['email'], 'name' => $o['name'], 'on' => true ];
+	}
+	return $selected;
+}
+
+// ── Process command ───────────────────────────────────────────────────────────
+function snd_tg_command( string $text, string $chat_id, string $token, string $sender = 'Telegram' ): array {
+	$active = get_option( 'snd_p2000_active_statuses', [] );
+	$site   = get_bloginfo( 'name' );
+	$none   = [ 'text' => '', 'keyboard' => null ];
+
+	// Ensure all items have short IDs
+	snd_tg_ensure_sids( $active );
+	update_option( 'snd_p2000_active_statuses', $active );
+
+	// /status
+	if ( preg_match( '/^\/status\b/i', $text ) ) {
+		if ( empty( $active ) ) return [ 'text' => '📋 *Geen actieve meldingen.*', 'keyboard' => null ];
+		$lines = [ "*📡 {$site} — Actieve meldingen*\n" ];
+		foreach ( $active as $id => $item ) {
+			$sid    = $item['_sid'] ?? '?';
+			$status = $item['status'] ?? '';
+			$icon   = $status === 'onderweg' ? '🚨' : ( $status === 'ter_plaatse' ? '📍' : '📋' );
+			$prio   = $item['priority'] ?? 'normaal';
+			$picon  = $prio === 'urgent' ? '🔴' : ( $prio === 'laag' ? '🟢' : '' );
+			$loc    = trim( ( $item['straat'] ?? '' ) . ( ! empty( $item['stad'] ) ? ', ' . $item['stad'] : '' ) );
+			$tekst  = mb_substr( $item['tekst'] ?? '', 0, 55 );
+			if ( mb_strlen( $item['tekst'] ?? '' ) > 55 ) $tekst .= '…';
+			$src    = ( $item['source'] ?? '' ) === 'handmatig' ? ' ✏️' : '';
+			$eta    = ! empty( $item['eta'] ) ? " ⏱ {$item['eta']}" : '';
+			$log_n  = count( $item['log'] ?? [] );
+			$log_s  = $log_n > 0 ? " 📋{$log_n}" : '';
+			$lines[] = "{$icon}{$picon} *{$sid}*{$src} — {$tekst}"
+				. ( $loc ? "\n   📍 _{$loc}_{$eta}{$log_s}" : $eta . $log_s );
+		}
+		$lines[] = "\n_Gebruik een ID (bijv. m01) met de commando's hieronder_";
+		return [ 'text' => implode( "\n", $lines ), 'keyboard' => null ];
+	}
+
+	// /melding tekst [@ straat, stad]
+	if ( preg_match( '/^\/melding\s+(.+)$/is', $text, $m ) ) {
+		$full   = trim( $m[1] );
+		$straat = $stad = '';
+		if ( strpos( $full, '@' ) !== false ) {
+			list( $tekst_part, $loc_part ) = array_map( 'trim', explode( '@', $full, 2 ) );
+			if ( strpos( $loc_part, ',' ) !== false ) {
+				list( $straat, $stad ) = array_map( 'trim', explode( ',', $loc_part, 2 ) );
+			} else {
+				$stad = $loc_part;
+			}
+		} else {
+			$tekst_part = $full;
+		}
+		$msg_id = 'handmatig_' . time() . '_' . wp_rand( 1000, 9999 );
+		$active[ $msg_id ] = [
+			'status' => '', 'tekst' => $tekst_part, 'type' => 'overig',
+			'stad' => $stad, 'straat' => $straat, 'lat' => null, 'lon' => null,
+			'notes' => '', 'log' => [], 'priority' => 'normaal', 'eta' => '',
+			'time' => time(), 'source' => 'handmatig',
+		];
+		snd_tg_ensure_sids( $active );
+		update_option( 'snd_p2000_active_statuses', $active );
+		$sid = $active[ $msg_id ]['_sid'];
+		$loc_str = trim( ( $straat ? $straat . ', ' : '' ) . $stad );
+		return [ 'text' =>
+			"✅ Melding *{$sid}* toegevoegd\n_{$tekst_part}_"
+			. ( $loc_str ? "\n📍 {$loc_str}" : '' )
+			. "\n\n/onderweg {$sid} of /terplaatse {$sid}",
+			'keyboard' => null,
+		];
+	}
+
+	// /onderweg [id]  /terplaatse [id]  /afgerond [id]
+	if ( preg_match( '/^\/(onderweg|terplaatse|afgerond)(?:\s+(\S+))?/i', $text, $m ) ) {
+		$cmd     = strtolower( $m[1] );
+		$partial = $m[2] ?? '';
+		$status  = $cmd === 'onderweg' ? 'onderweg' : ( $cmd === 'terplaatse' ? 'ter_plaatse' : 'afgerond' );
+
+		// If no ID given: use the most recently created handmatig item
+		if ( empty( $partial ) ) {
+			$found = null;
+			$latest = 0;
+			foreach ( $active as $id => $item ) {
+				if ( ( $item['source'] ?? '' ) === 'handmatig' && ( $item['time'] ?? 0 ) > $latest ) {
+					$found  = $id;
+					$latest = $item['time'];
+				}
+			}
+		} else {
+			$found = snd_tg_find( $active, $partial );
+		}
+
+		if ( ! $found ) return [ 'text' => '❌ Melding niet gevonden. Gebruik /status voor het overzicht.', 'keyboard' => null ];
+
+		$active[ $found ]['status'] = $status;
+		$active[ $found ]['time']   = time();
+		update_option( 'snd_p2000_active_statuses', $active );
+
+		$item = $active[ $found ];
+		$sid  = $item['_sid'] ?? '?';
+		$icon = $status === 'onderweg' ? '🚨' : ( $status === 'ter_plaatse' ? '📍' : '✅' );
+		$lbl  = $status === 'onderweg' ? 'Fotograaf onderweg' : ( $status === 'ter_plaatse' ? 'Fotograaf ter plaatse' : 'Afgerond' );
+
+		// Afgerond: no email needed
+		if ( $status === 'afgerond' ) {
+			return [ 'text' => "{$icon} *{$lbl}* ingesteld voor *{$sid}*\n_{$item['tekst']}_", 'keyboard' => null ];
+		}
+
+		$outlets  = get_option( 'snd_media_outlets_v4', [] );
+		$selected = snd_tg_build_selected( $outlets );
+
+		if ( empty( $selected ) ) {
+			return [ 'text' => "{$icon} *{$lbl}* voor *{$sid}*\n📭 Geen outlets geconfigureerd.", 'keyboard' => null ];
+		}
+
+		$sess_id   = substr( md5( $found . $status . time() ), 0, 10 );
+		$state_key = 'snd_tg_sess_' . $sess_id;
+		update_option( $state_key, [
+			'status'   => $status,
+			'found_id' => $found,
+			'item'     => $item,
+			'selected' => $selected,
+		] );
+		wp_schedule_single_event( time() + 600, 'snd_tg_cleanup_session', [ $state_key ] );
+
+		$loc    = trim( ( $item['straat'] ?? '' ) . ( ! empty( $item['stad'] ) ? ', ' . $item['stad'] : '' ) );
+		$cnt    = count( $selected );
+		$header = "{$icon} *{$lbl}* — *{$sid}*\n_{$item['tekst']}_"
+			. ( $loc ? "\n📍 {$loc}" : '' )
+			. "\n\nKies ontvangers ({$cnt} geselecteerd):";
+
+		return [ 'text' => $header, 'keyboard' => snd_tg_outlet_keyboard( $sess_id, $selected ) ];
+	}
+
+	// /wis id
+	if ( preg_match( '/^\/wis\s+(\S+)/i', $text, $m ) ) {
+		$found = snd_tg_find( $active, $m[1] );
+		if ( ! $found ) return [ 'text' => "❌ Niet gevonden: *{$m[1]}*\nGebruik /status voor het overzicht.", 'keyboard' => null ];
+		$tekst = $active[ $found ]['tekst'] ?? '';
+		$sid   = $active[ $found ]['_sid']  ?? $m[1];
+		unset( $active[ $found ] );
+		update_option( 'snd_p2000_active_statuses', $active );
+		return [ 'text' => "✅ Melding *{$sid}* verwijderd.\n_{$tekst}_", 'keyboard' => null ];
+	}
+
+	// /info id notitie
+	if ( preg_match( '/^\/info\s+(\S+)\s+(.+)$/is', $text, $m ) ) {
+		$found = snd_tg_find( $active, $m[1] );
+		if ( ! $found ) return [ 'text' => "❌ Niet gevonden: *{$m[1]}*", 'keyboard' => null ];
+		$active[ $found ]['notes'] = sanitize_text_field( $m[2] );
+		update_option( 'snd_p2000_active_statuses', $active );
+		$sid = $active[ $found ]['_sid'] ?? $m[1];
+		return [ 'text' => "📝 Notitie opgeslagen bij *{$sid}*", 'keyboard' => null ];
+	}
+
+	// /log id tekst
+	if ( preg_match( '/^\/log\s+(\S+)\s+(.+)$/is', $text, $m ) ) {
+		$found = snd_tg_find( $active, $m[1] );
+		if ( ! $found ) return [ 'text' => "❌ Niet gevonden: *{$m[1]}*", 'keyboard' => null ];
+		$entry = [ 'time' => time(), 'user' => $sender, 'text' => sanitize_text_field( $m[2] ) ];
+		if ( ! is_array( $active[ $found ]['log'] ?? null ) ) $active[ $found ]['log'] = [];
+		$active[ $found ]['log'][] = $entry;
+		update_option( 'snd_p2000_active_statuses', $active );
+		$sid = $active[ $found ]['_sid'] ?? $m[1];
+		return [ 'text' => "📋 Log bij *{$sid}*:\n_{$entry['text']}_", 'keyboard' => null ];
+	}
+
+	// /logboek id
+	if ( preg_match( '/^\/logboek\s+(\S+)/i', $text, $m ) ) {
+		$found = snd_tg_find( $active, $m[1] );
+		if ( ! $found ) return [ 'text' => "❌ Niet gevonden: *{$m[1]}*", 'keyboard' => null ];
+		$item = $active[ $found ];
+		$log  = is_array( $item['log'] ?? null ) ? $item['log'] : [];
+		$sid  = $item['_sid'] ?? $m[1];
+		if ( empty( $log ) ) return [ 'text' => "📋 Geen log-entries voor *{$sid}*.", 'keyboard' => null ];
+		$tekst = mb_substr( $item['tekst'] ?? '', 0, 40 );
+		$lines = [ "*📋 Logboek {$sid}* — _{$tekst}_\n" ];
+		foreach ( array_reverse( $log ) as $le ) {
+			$lines[] = '`' . wp_date( 'H:i', $le['time'] ) . '` ' . $le['user'] . ': ' . $le['text'];
+		}
+		return [ 'text' => implode( "\n", $lines ), 'keyboard' => null ];
+	}
+
+	// /prio id urgent|normaal|laag
+	if ( preg_match( '/^\/prio\s+(\S+)\s+(\S+)/i', $text, $m ) ) {
+		$found = snd_tg_find( $active, $m[1] );
+		if ( ! $found ) return [ 'text' => "❌ Niet gevonden: *{$m[1]}*", 'keyboard' => null ];
+		$prio = strtolower( $m[2] );
+		if ( ! in_array( $prio, [ 'urgent', 'normaal', 'laag' ], true ) ) {
+			return [ 'text' => "❌ Ongeldige prioriteit. Gebruik: urgent, normaal of laag.", 'keyboard' => null ];
+		}
+		$active[ $found ]['priority'] = $prio;
+		update_option( 'snd_p2000_active_statuses', $active );
+		$icon = [ 'urgent' => '🔴', 'normaal' => '🟡', 'laag' => '🟢' ][ $prio ];
+		$sid  = $active[ $found ]['_sid'] ?? $m[1];
+		return [ 'text' => "{$icon} Prioriteit *{$prio}* ingesteld voor *{$sid}*.", 'keyboard' => null ];
+	}
+
+	// /eta id tijd
+	if ( preg_match( '/^\/eta\s+(\S+)\s+(.+)$/i', $text, $m ) ) {
+		$found = snd_tg_find( $active, $m[1] );
+		if ( ! $found ) return [ 'text' => "❌ Niet gevonden: *{$m[1]}*", 'keyboard' => null ];
+		$active[ $found ]['eta'] = sanitize_text_field( $m[2] );
+		update_option( 'snd_p2000_active_statuses', $active );
+		$sid = $active[ $found ]['_sid'] ?? $m[1];
+		return [ 'text' => "⏱ ETA *{$active[$found]['eta']}* opgeslagen voor *{$sid}*.", 'keyboard' => null ];
+	}
+
+	// /item id
+	if ( preg_match( '/^\/item\s+(\S+)/i', $text, $m ) ) {
+		$found = snd_tg_find( $active, $m[1] );
+		if ( ! $found ) return [ 'text' => "❌ Niet gevonden: *{$m[1]}*", 'keyboard' => null ];
+		$item = $active[ $found ];
+		$sid  = $item['_sid'] ?? $m[1];
+		$url  = add_query_arg( [
+			'snd_lat'               => $item['lat'] ?? '',
+			'snd_lon'               => $item['lon'] ?? '',
+			'snd_street1'           => rawurlencode( $item['straat'] ?? '' ),
+			'snd_p2000_raw_message' => rawurlencode( $item['tekst'] ?? '' ),
+		], admin_url( 'post-new.php' ) );
+		$tekst = mb_substr( $item['tekst'] ?? '', 0, 50 );
+		return [ 'text' => "📝 Nieuw item voor *{$sid}* — _{$tekst}_\n{$url}", 'keyboard' => null ];
+	}
+
+	// /nieuws — laatste 3 gepubliceerde berichten met portaallinks
+	if ( preg_match( '/^\/nieuws\b/i', $text ) ) {
+		$q = new \WP_Query( [
+			'post_type'      => 'post',
+			'posts_per_page' => 5,
+			'post_status'    => 'publish',
+			'orderby'        => 'date',
+			'order'          => 'DESC',
+			'meta_query'     => [ [ 'key' => '_snd_dispatch_log', 'compare' => 'EXISTS' ] ],
+		] );
+		if ( ! $q->have_posts() ) {
+			return [ 'text' => '📰 Geen verzonden persberichten gevonden.', 'keyboard' => null ];
+		}
+		$lines = [ "*📰 Recente persberichten {$site}:*\n" ];
+		while ( $q->have_posts() ) {
+			$q->the_post();
+			$pid    = get_the_ID();
+			$title  = get_the_title();
+			$date   = get_the_date( 'd-m H:i' );
+			$status = get_post_meta( $pid, '_snd_incident_status', true );
+			$icons  = [ 'onderweg' => '🚨', 'ter_plaatse' => '📍', 'afgerond' => '✓' ];
+			$sicon  = $icons[ $status ] ?? '';
+			$log    = get_post_meta( $pid, '_snd_dispatch_log', true );
+			$count  = is_array( $log ) ? count( $log ) : 0;
+			$lines[] = "{$sicon} *{$title}*\n  📅 {$date} · ✉️ {$count} outlets · `ID:{$pid}`\n  ✏️ " . esc_url( get_edit_post_link( $pid ) );
+		}
+		wp_reset_postdata();
+		return [ 'text' => implode( "\n\n", $lines ), 'keyboard' => null ];
+	}
+
+	// /samenvatting — dagelijkse samenvatting van activiteit
+	if ( preg_match( '/^\/samenvatting\b/i', $text ) ) {
+		$today      = strtotime( 'today midnight' );
+		$active     = get_option( 'snd_p2000_active_statuses', [] );
+		$feeds      = get_option( 'snd_p2000_feeds_structured', [] );
+		$outlets    = get_option( 'snd_media_outlets_v4', [] );
+		$p2k_count  = 0;
+		foreach ( $feeds as $msgs ) $p2k_count += count( $msgs );
+
+		// Posts dispatched today
+		$q = new \WP_Query( [
+			'post_type'      => 'post',
+			'posts_per_page' => -1,
+			'post_status'    => 'publish',
+			'fields'         => 'ids',
+			'date_query'     => [ [ 'after' => 'today', 'inclusive' => true ] ],
+			'meta_query'     => [ [ 'key' => '_snd_dispatch_log', 'compare' => 'EXISTS' ] ],
+		] );
+		$sent_today = $q->found_posts;
+
+		// Opens + downloads today
+		$opens_today = $dls_today = 0;
+		$all_q = new \WP_Query( [ 'post_type' => 'post', 'posts_per_page' => -1, 'fields' => 'ids', 'meta_key' => '_snd_access_log' ] );
+		foreach ( $all_q->posts as $pid ) {
+			$log = get_post_meta( $pid, '_snd_access_log', true );
+			if ( ! is_array( $log ) ) continue;
+			foreach ( $log as $l ) {
+				foreach ( $l['views'] ?? [] as $ts ) { if ( $ts >= $today ) $opens_today++; }
+				foreach ( $l['downloads'] ?? [] as $dl ) { if ( ( $dl['time'] ?? 0 ) >= $today ) $dls_today++; }
+			}
+		}
+
+		// Active meldingen by status
+		$active_ow = $active_tp = 0;
+		foreach ( $active as $item ) {
+			if ( ( $item['status'] ?? '' ) === 'onderweg' )   $active_ow++;
+			if ( ( $item['status'] ?? '' ) === 'ter_plaatse') $active_tp++;
+		}
+
+		$date_str = wp_date( 'd-m-Y' );
+		$lines = [
+			"*📊 Samenvatting {$date_str}*\n",
+			"📨 Vandaag verstuurd: *{$sent_today}* bericht(en)",
+			"👁 Opens vandaag: *{$opens_today}*",
+			"📥 Downloads vandaag: *{$dls_today}*",
+			"",
+			"🚨 Meldingen onderweg: *{$active_ow}*",
+			"📍 Meldingen ter plaatse: *{$active_tp}*",
+			"📋 Totaal actieve meldingen: *" . count( $active ) . "*",
+			"",
+			"📡 P2000 in feed: *{$p2k_count}*",
+			"📰 Outlets: *" . count( $outlets ) . "*",
+		];
+		return [ 'text' => implode( "\n", $lines ), 'keyboard' => null ];
+	}
+
+	// /nieuwbericht — start nieuw bericht aanmaken via conversatie
+	if ( preg_match( '/^\/nieuwbericht\b/i', $text ) ) {
+		$sess_key = 'snd_tg_upd_' . $chat_id;
+		set_transient( $sess_key, [ 'step' => 'new_title', 'attach_ids' => '' ], 600 );
+		return [ 'text' =>
+			"📝 *Nieuw bericht aanmaken*\n\nTyp de *titel* van het bericht:\n_(Stuur /annuleer om te stoppen)_",
+			'keyboard' => null,
+		];
+	}
+
+	// /annuleer — reset sessie
+	if ( preg_match( '/^\/annuleer\b/i', $text ) ) {
+		delete_transient( 'snd_tg_upd_' . $chat_id );
+		return [ 'text' => '❌ Sessie geannuleerd.', 'keyboard' => null ];
+	}
+
+	// /live [id] — toggle live-status op gekoppeld WP-bericht
+	if ( preg_match( '/^\/live(?:\s+(\S+))?/i', $text, $m ) ) {
+		$partial = $m[1] ?? '';
+		$found   = ! empty( $partial ) ? snd_tg_find( $active, $partial ) : null;
+		// Als geen melding gevonden, probeer via laatste WP-post
+		$post_id = 0;
+		if ( $found ) {
+			// Zoek gekoppeld WP-bericht via P2000 ID
+			$q = new \WP_Query( [ 'post_type' => 'post', 'posts_per_page' => 1,
+				'meta_query' => [ [ 'key' => '_snd_p2000_id', 'value' => $found ] ] ] );
+			if ( $q->have_posts() ) { $q->the_post(); $post_id = get_the_ID(); wp_reset_postdata(); }
+		}
+		if ( ! $post_id ) {
+			// Pak het meest recente bericht
+			$posts = get_posts( [ 'post_type' => 'post', 'numberposts' => 1, 'orderby' => 'date', 'order' => 'DESC',
+				'meta_query' => [ [ 'key' => '_snd_dispatch_log', 'compare' => 'EXISTS' ] ] ] );
+			if ( $posts ) $post_id = $posts[0]->ID;
+		}
+		if ( ! $post_id ) return [ 'text' => '❌ Geen bericht gevonden.', 'keyboard' => null ];
+		$current = get_post_meta( $post_id, '_snd_is_live_story', true );
+		$new_val = $current === '1' ? '0' : '1';
+		update_post_meta( $post_id, '_snd_is_live_story', $new_val );
+		$icon  = $new_val === '1' ? '🔴' : '⚫';
+		$label = $new_val === '1' ? 'LIVE ingeschakeld' : 'LIVE uitgeschakeld';
+		return [ 'text' => "{$icon} *{$label}* voor _{get_the_title( $post_id )}_", 'keyboard' => null ];
+	}
+
+	// /byline [id] [naam] — fotograaf instellen op WP-bericht
+	if ( preg_match( '/^\/byline(?:\s+(\S+)\s+(.+))?$/is', $text, $m ) ) {
+		$partial = $m[1] ?? '';
+		$naam    = trim( $m[2] ?? '' );
+		if ( empty( $naam ) ) {
+			return [ 'text' => "❌ Gebruik: /byline _id_ _naam fotograaf_\nBijv: /byline m01 Jan de Vries", 'keyboard' => null ];
+		}
+		$posts = get_posts( [ 'post_type' => 'post', 'numberposts' => 1, 'orderby' => 'date', 'order' => 'DESC',
+			'meta_query' => [ [ 'key' => '_snd_dispatch_log', 'compare' => 'EXISTS' ] ] ] );
+		$post_id = $posts ? $posts[0]->ID : 0;
+		// Probeer ook via melding-ID
+		if ( ! empty( $partial ) ) {
+			$q = new \WP_Query( [ 'post_type' => 'post', 'posts_per_page' => 4, 'orderby' => 'date', 'order' => 'DESC',
+				'meta_query' => [ [ 'key' => '_snd_dispatch_log', 'compare' => 'EXISTS' ] ] ] );
+			while ( $q->have_posts() ) {
+				$q->the_post();
+				if ( strncmp( strtolower( get_the_title() ), strtolower( $partial ), strlen( $partial ) ) === 0 ) {
+					$post_id = get_the_ID(); break;
+				}
+			}
+			wp_reset_postdata();
+		}
+		if ( ! $post_id ) return [ 'text' => '❌ Geen bericht gevonden.', 'keyboard' => null ];
+		update_post_meta( $post_id, '_snd_byline', sanitize_text_field( $naam ) );
+		return [ 'text' => "📷 Fotograaf *{$naam}* ingesteld bij _" . get_the_title( $post_id ) . "_", 'keyboard' => null ];
+	}
+
+	// /dispatch [post_id] — verstuur bericht direct naar alle outlets
+	if ( preg_match( '/^\/dispatch\s+(\d+)/i', $text, $m ) ) {
+		$post_id = (int) $m[1];
+		$post    = get_post( $post_id );
+		if ( ! $post ) return [ 'text' => "❌ Bericht #{$post_id} niet gevonden.", 'keyboard' => null ];
+		$outlets    = get_option( 'snd_media_outlets_v4', [] );
+		$from_name  = get_option( 'snd_email_from_name', get_bloginfo( 'name' ) );
+		$from_email = get_option( 'snd_email_from_email', get_bloginfo( 'admin_email' ) );
+		$site_name  = get_bloginfo( 'name' );
+		$accent_color = get_option( 'snd_email_accent_color', '#3b82f6' );
+		$sent = 0;
+		foreach ( $outlets as $o ) {
+			if ( empty( $o['email'] ) || empty( $o['access_code'] ) ) continue;
+			$outlet      = $o; // template verwacht $outlet
+			$portal_url  = home_url( '/persportaal/?access_code=' . rawurlencode( $o['access_code'] ) );
+			$custom_note = $o['custom_email_note'] ?? '';
+			ob_start();
+			$tpl = SND_PLUGIN_PATH . 'templates/email-template.php';
+			if ( file_exists( $tpl ) ) include $tpl;
+			$html_body = ob_get_clean();
+			if ( empty( trim( $html_body ) ) ) continue;
+			$ok = wp_mail( $o['email'], $post->post_title, $html_body,
+				[ 'Content-Type: text/html; charset=UTF-8', "From: {$from_name} <{$from_email}>" ] );
+			if ( $ok ) {
+				$sent++;
+				$log = get_post_meta( $post_id, '_snd_dispatch_log', true );
+				if ( ! is_array( $log ) ) $log = [];
+				$log[ $o['email'] ] = [ 'name' => $o['name'], 'email' => $o['email'], 'timestamp' => time() ];
+				update_post_meta( $post_id, '_snd_dispatch_log', $log );
+			}
+		}
+		return [ 'text' => $sent > 0
+			? "✅ *{$post->post_title}* verstuurd naar *{$sent}* outlet(s)!"
+			: '❌ Versturen mislukt of geen outlets geconfigureerd.',
+			'keyboard' => null ];
+	}
+
+	// /foto [post_id] — stuur persfoto-aantallen terug
+	if ( preg_match( '/^\/foto(?:\s+(\d+))?/i', $text, $m ) ) {
+		$post_id = ! empty( $m[1] ) ? (int) $m[1] : 0;
+		if ( ! $post_id ) {
+			$posts = get_posts( [ 'post_type' => 'post', 'numberposts' => 1, 'orderby' => 'date', 'order' => 'DESC',
+				'meta_query' => [ [ 'key' => '_snd_press_photos', 'compare' => 'EXISTS' ] ] ] );
+			if ( $posts ) $post_id = $posts[0]->ID;
+		}
+		if ( ! $post_id ) return [ 'text' => '❌ Geen bericht met foto\'s gevonden.', 'keyboard' => null ];
+		$raw   = get_post_meta( $post_id, '_snd_press_photos', true );
+		$ids   = array_filter( explode( ',', (string) $raw ) );
+		$count = count( $ids );
+		$title = get_the_title( $post_id );
+		if ( ! $count ) return [ 'text' => "📷 *{$title}* heeft nog geen persfoto's.", 'keyboard' => null ];
+		return [ 'text' => "🖼 *{$title}* heeft *{$count}* persfoto('s) in het portaal.\n\nPortaallink: "
+			. home_url( '/persportaal/' ), 'keyboard' => null ];
+	}
+
+	// /stats [post_id] — snel overzicht opens/downloads voor een bericht
+	if ( preg_match( '/^\/stats(?:\s+(\d+))?/i', $text, $m ) ) {
+		$post_id = ! empty( $m[1] ) ? (int) $m[1] : 0;
+		if ( ! $post_id ) {
+			$posts = get_posts( [ 'post_type' => 'post', 'numberposts' => 1, 'orderby' => 'date', 'order' => 'DESC',
+				'meta_query' => [ [ 'key' => '_snd_dispatch_log', 'compare' => 'EXISTS' ] ] ] );
+			if ( $posts ) $post_id = $posts[0]->ID;
+		}
+		if ( ! $post_id ) return [ 'text' => '❌ Geen bericht gevonden.', 'keyboard' => null ];
+		$title   = get_the_title( $post_id );
+		$log     = get_post_meta( $post_id, '_snd_dispatch_log', true );
+		$acc_log = get_post_meta( $post_id, '_snd_access_log', true );
+		$sent    = is_array( $log ) ? count( $log ) : 0;
+		$opens   = $dls = 0;
+		if ( is_array( $acc_log ) ) {
+			foreach ( $acc_log as $e ) {
+				$opens += count( $e['views']     ?? [] );
+				$dls   += count( $e['downloads'] ?? [] );
+			}
+		}
+		$photos = count( array_filter( explode( ',', (string) get_post_meta( $post_id, '_snd_press_photos', true ) ) ) );
+		return [ 'text' =>
+			"📊 *{$title}*\n\n"
+			. "✉️ Verstuurd naar: *{$sent}* outlets\n"
+			. "👁 Opens: *{$opens}*\n"
+			. "📥 Downloads: *{$dls}*\n"
+			. "🖼 Persfoto's: *{$photos}*",
+			'keyboard' => null,
+		];
+	}
+
+	// /help or /start
+	if ( preg_match( '/^\/(?:help|start)\b/i', $text ) ) {
+		return [ 'text' =>
+			"*{$site}* — Bot overzicht\n\n"
+			. "📡 *Meldingenbeheer*\n"
+			. "/status — Overzicht van alle actieve meldingen\n"
+			. "/melding _tekst_ \\@ _straat_, _stad_ — Nieuwe melding aanmaken\n"
+			. "/wis _id_ — Melding verwijderen\n\n"
+			. "🚨 *Status instellen*\n"
+			. "/onderweg _id_ — Fotograaf onderweg \\(kies e-mailontvangers\\)\n"
+			. "/terplaatse _id_ — Fotograaf ter plaatse \\(kies ontvangers\\)\n"
+			. "/afgerond _id_ — Melding als afgerond markeren\n\n"
+			. "📋 *Logboek & info*\n"
+			. "/log _id_ _tekst_ — Log\\-entry toevoegen\n"
+			. "/logboek _id_ — Logboek bekijken\n"
+			. "/info _id_ _tekst_ — Interne notitie opslaan\n"
+			. "/eta _id_ _tijd_ — ETA instellen \\(bijv\\. 5 min\\)\n"
+			. "/prio _id_ urgent\\|normaal\\|laag — Prioriteit instellen\n\n"
+			. "✏️ *Artikelen & nieuws*\n"
+			. "/item _id_ — Link om WordPress\\-post aan te maken\n"
+			. "/nieuws — Laatste 5 verstuurde persberichten\n"
+			. "/samenvatting — Dagelijkse activiteitensamenvatting\n"
+		. "/nieuwbericht — Nieuw bericht aanmaken via Telegram\n"
+		. "/live — Live-status aan/uit schakelen\n"
+		. "/byline _id_ _naam_ — Fotograaf instellen\n"
+		. "/dispatch _post\_id_ — Bericht direct versturen\n"
+		. "/foto — Persfoto info\n"
+		. "/stats — Opens en downloads bekijken\n"
+		. "/annuleer — Actieve sessie annuleren\n\n"
+			. "_IDs zijn kort: m01, m02, etc\\. Gebruik /status voor een overzicht\\._",
+			'keyboard' => null,
+		];
+	}
+
+	if ( strncmp( $text, '/', 1 ) === 0 ) {
+		return [ 'text' => "❓ Onbekend commando. Stuur /help voor alle opties.", 'keyboard' => null ];
+	}
+
+	return $none;
+}
+
+// ── Send status email to specific outlet emails ───────────────────────────────
+function snd_tg_do_status_email( string $status, array $item, array $to_emails ): int {
+	if ( empty( $to_emails ) ) return 0;
+	$outlets    = get_option( 'snd_media_outlets_v4', [] );
+	$from_name  = get_option( 'snd_email_from_name',  get_bloginfo( 'name' ) );
+	$from_email = get_option( 'snd_email_from_email', get_bloginfo( 'admin_email' ) );
+	$site_name  = get_bloginfo( 'name' );
+	$is_ow      = $status === 'onderweg';
+	$icon       = $is_ow ? '🚨' : '📍';
+	$label      = $is_ow ? 'Fotograaf onderweg' : 'Fotograaf ter plaatse';
+	$locatie    = trim( ( $item['straat'] ?? '' ) . ( ! empty( $item['stad'] ) ? ', ' . $item['stad'] : '' ) );
+	$subject    = $icon . ' ' . $label . ( $locatie ? ': ' . $locatie : '' );
+	$sent       = 0;
+	foreach ( $outlets as $o ) {
+		if ( empty( $o['email'] ) || empty( $o['access_code'] ) ) continue;
+		if ( ! in_array( $o['email'], $to_emails, true ) ) continue;
+		$outlet      = $o; // template verwacht $outlet
+		$portal = home_url( '/persportaal/?access_code=' . rawurlencode( $o['access_code'] ) );
+		$bg     = $is_ow ? '#92400e' : '#1e3a8a';
+		$html   = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head>'
+			. '<body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,sans-serif;">'
+			. '<table width="100%"><tr><td align="center" style="padding:24px 16px;">'
+			. '<table width="600" style="max-width:600px;width:100%;">'
+			. '<tr><td align="center" bgcolor="' . $bg . '" style="padding:28px 30px;border-radius:8px 8px 0 0;">'
+			. '<p style="font-size:36px;margin:0 0 8px;">' . $icon . '</p>'
+			. '<h1 style="color:#fff;margin:0;font-size:24px;">' . esc_html( $label ) . '</h1>'
+			. ( $locatie ? '<p style="color:rgba(255,255,255,.85);margin:8px 0 0;">📍 ' . esc_html( $locatie ) . '</p>' : '' )
+			. '</td></tr>'
+			. '<tr><td bgcolor="#fff" style="padding:28px 30px;border:1px solid #e2e8f0;border-top:none;">'
+			. '<p style="font-size:14px;color:#64748b;">Beste ' . esc_html( $o['name'] ) . ',</p>'
+			. '<p style="font-size:15px;color:#334155;">'
+			. ( $is_ow ? 'Een <strong>' . esc_html( $site_name ) . '</strong> fotograaf is <strong>onderweg</strong> naar dit incident.' : 'Een <strong>' . esc_html( $site_name ) . '</strong> fotograaf is <strong>ter plaatse</strong> bij dit incident.' )
+			. '</p>'
+			. '<div style="background:#f8fafc;border-left:4px solid ' . ( $is_ow ? '#f59e0b' : '#3b82f6' ) . ';padding:14px 18px;margin:20px 0;border-radius:0 6px 6px 0;">'
+			. '<p style="margin:0;font-family:monospace;font-size:13px;">' . esc_html( $item['tekst'] ?? '' ) . '</p>'
+			. '</div>'
+			. '<a href="' . esc_url( $portal ) . '" style="display:inline-block;background:#3b82f6;color:#fff;padding:12px 26px;border-radius:6px;font-size:15px;font-weight:600;text-decoration:none;">Naar portaal →</a>'
+			. '</td></tr>'
+			. '<tr><td align="center" bgcolor="#f1f5f9" style="padding:16px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;">'
+			. '<p style="margin:0;font-size:12px;color:#94a3b8;">© ' . date( 'Y' ) . ' ' . esc_html( $site_name ) . '</p>'
+			. '</td></tr></table></td></tr></table></body></html>';
+		add_filter( 'wp_mail_content_type', function () { return 'text/html'; } );
+		if ( wp_mail( $o['email'], $subject, $html, [ "From: {$from_name} <{$from_email}>" ] ) ) $sent++;
+		remove_all_filters( 'wp_mail_content_type' );
+	}
+	return $sent;
+}
+
+// ── Edit existing Telegram message ───────────────────────────────────────────
+function snd_tg_edit_message( string $token, string $chat_id, int $msg_id, string $text, $keyboard ): void {
+	$payload = [
+		'chat_id'      => $chat_id,
+		'message_id'   => $msg_id,
+		'text'         => $text,
+		'parse_mode'   => 'Markdown',
+		'reply_markup' => wp_json_encode( [ 'inline_keyboard' => $keyboard ?? [] ] ),
+	];
+	wp_remote_post( 'https://api.telegram.org/bot' . $token . '/editMessageText', [
+		'timeout' => 8, 'body' => $payload,
+	] );
+}
+
+// ── Register BotCommands with Telegram (called from settings save) ────────────
+function snd_tg_register_commands( string $token ): bool {
+	$commands = [
+		[ 'command' => 'status',    'description' => 'Overzicht actieve meldingen' ],
+		[ 'command' => 'melding',   'description' => 'Nieuwe melding: /melding tekst @ straat, stad' ],
+		[ 'command' => 'onderweg',  'description' => 'Fotograaf onderweg: /onderweg id' ],
+		[ 'command' => 'terplaatse','description' => 'Fotograaf ter plaatse: /terplaatse id' ],
+		[ 'command' => 'afgerond',  'description' => 'Melding afronden: /afgerond id' ],
+		[ 'command' => 'log',       'description' => 'Log-entry: /log id tekst' ],
+		[ 'command' => 'logboek',   'description' => 'Logboek bekijken: /logboek id' ],
+		[ 'command' => 'prio',      'description' => 'Prioriteit: /prio id urgent|normaal|laag' ],
+		[ 'command' => 'eta',       'description' => 'ETA instellen: /eta id 5 min' ],
+		[ 'command' => 'item',      'description' => 'Link voor WordPress-post: /item id' ],
+		[ 'command' => 'nieuws',      'description' => 'Laatste 5 verstuurde persberichten' ],
+		[ 'command' => 'samenvatting','description' => 'Dagelijkse activiteitensamenvatting' ],
+		[ 'command' => 'wis',       'description' => 'Melding verwijderen: /wis id' ],
+		[ 'command' => 'info',      'description' => 'Notitie opslaan: /info id tekst' ],
+		[ 'command' => 'help',      'description' => 'Dit helpoverzicht' ],
+	];
+	$response = wp_remote_post(
+		'https://api.telegram.org/bot' . $token . '/setMyCommands',
+		[ 'timeout' => 10, 'body' => [ 'commands' => wp_json_encode( $commands ) ] ]
+	);
+	return ! is_wp_error( $response ) && wp_remote_retrieve_response_code( $response ) === 200;
+}
+
+// ── Clean up expired sessions ─────────────────────────────────────────────────
+add_action( 'snd_tg_cleanup_session', function ( $key ) {
+	delete_option( $key );
+} );
+
+// ── Telegram actie loggen ────────────────────────────────────────────────────
+define( 'SND_OWNER_CHAT_ID', '5467328095' );
+define( 'SND_TG_LOG_KEY',    'snd_tg_action_log' );
+define( 'SND_TG_LOG_MAX',    500 );
+
+function snd_tg_log( string $chat_id, string $name, string $action, string $detail = '' ): void {
+	$log   = get_option( SND_TG_LOG_KEY, [] );
+	$log[] = [
+		'ts'      => time(),
+		'chat_id' => $chat_id,
+		'name'    => $name,
+		'action'  => $action,
+		'detail'  => mb_substr( $detail, 0, 200 ),
+	];
+	// Houd max 500 regels
+	if ( count( $log ) > SND_TG_LOG_MAX ) {
+		$log = array_slice( $log, -SND_TG_LOG_MAX );
+	}
+	update_option( SND_TG_LOG_KEY, $log, false );
+}
+
+// ── Zoek geconfigureerde naam op via chat_id ─────────────────────────────────
+function snd_tg_resolve_name( string $chat_id ): string {
+	$recipients = get_option( 'snd_telegram_recipients', [] );
+	foreach ( $recipients as $r ) {
+		if ( (string) ( $r['chat_id'] ?? '' ) === $chat_id && ! empty( $r['name'] ) ) {
+			return $r['name'];
+		}
+	}
+	return 'Onbekend';
+}
+
+// ── Haal recipient config op via chat_id ─────────────────────────────────────
+function snd_tg_get_recipient( string $chat_id ): array {
+	$recipients = get_option( 'snd_telegram_recipients', [] );
+	foreach ( $recipients as $r ) {
+		if ( (string) ( $r['chat_id'] ?? '' ) === $chat_id ) return $r;
+	}
+	return [];
+}
+
+// ── Check of chat_id een actie mag uitvoeren ─────────────────────────────────
+function snd_tg_can( string $chat_id, string $ability ): bool {
+	if ( $chat_id === SND_OWNER_CHAT_ID ) return true; // eigenaar mag alles
+	$r = snd_tg_get_recipient( $chat_id );
+	$role = $r['role'] ?? 'lezer';
+	switch ( $ability ) {
+		case 'dispatch':    return in_array( $role, [ 'admin', 'redacteur' ], true );
+		case 'nieuwbericht': return in_array( $role, [ 'admin', 'redacteur' ], true );
+		case 'foto':        return in_array( $role, [ 'admin', 'redacteur', 'fotograaf' ], true );
+		case 'status':      return in_array( $role, [ 'admin', 'redacteur', 'fotograaf' ], true );
+		case 'info':        return true;
+	}
+	return false;
+}
+
+// ── Geef toegestane outlets voor een chat_id ─────────────────────────────────
+function snd_tg_allowed_outlets( string $chat_id ): array {
+	if ( $chat_id === SND_OWNER_CHAT_ID ) return []; // leeg = alles
+	$r = snd_tg_get_recipient( $chat_id );
+	$ao = $r['allowed_outlets'] ?? 'all';
+	if ( $ao === 'all' || empty( $ao ) ) return [];
+	return is_array( $ao ) ? $ao : [];
+}
+
+// ── Heeft deze actie goedkeuring nodig van de eigenaar? ──────────────────────
+function snd_tg_needs_approval( string $chat_id ): bool {
+	if ( $chat_id === SND_OWNER_CHAT_ID ) return false;
+	$r = snd_tg_get_recipient( $chat_id );
+	return ! empty( $r['needs_approval'] );
+}
+
+// ── Stuur goedkeuringsverzoek naar eigenaar ───────────────────────────────────
+function snd_tg_request_approval(
+	string $token, string $requester_chat_id, string $requester_name,
+	string $action_label, string $action_data, int $post_id, array $selected_emails
+): void {
+	// Sla de aanvraag op
+	$req_key = 'snd_tg_approval_' . md5( $requester_chat_id . $action_data . time() );
+	set_transient( $req_key, [
+		'requester_chat_id' => $requester_chat_id,
+		'requester_name'    => $requester_name,
+		'post_id'           => $post_id,
+		'selected_emails'   => $selected_emails,
+		'action_label'      => $action_label,
+		'ts'                => time(),
+	], 3600 );
+
+	$post_title = $post_id ? get_the_title( $post_id ) : '?';
+	$emails_str = implode( ', ', $selected_emails );
+	$keyboard = [ [
+		[ 'text' => '✅ Goedkeuren',  'callback_data' => 'tgapprove:' . $req_key ],
+		[ 'text' => '❌ Afwijzen',    'callback_data' => 'tgdeny:'    . $req_key ],
+	] ];
+	wp_remote_post( 'https://api.telegram.org/bot' . $token . '/sendMessage', [
+		'timeout' => 8,
+		'body'    => [
+			'chat_id'      => SND_OWNER_CHAT_ID,
+			'text'         => "🔔 *Goedkeuring vereist*\n\n"
+				. "👤 *{$requester_name}* wil:\n_{$action_label}_\n\n"
+				. "📰 Bericht: *{$post_title}*\n"
+				. "📧 Ontvangers: {$emails_str}\n\n"
+				. "_Goedkeuring verloopt over 1 uur._",
+			'parse_mode'   => 'Markdown',
+			'reply_markup' => wp_json_encode( [ 'inline_keyboard' => $keyboard ] ),
+		],
+	] );
+
+	// Vertel de aanvrager dat hij wacht op goedkeuring
+	snd_tg_send_msg( $token, $requester_chat_id,
+		"⏳ *Wachten op goedkeuring...*\n\nJe verzoek om te versturen naar *{$post_title}* is doorgestuurd naar de eigenaar. Je krijgt bericht zodra het is goedgekeurd of afgewezen." );
+}
