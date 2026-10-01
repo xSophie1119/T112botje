@@ -29,6 +29,8 @@ public class NavigationService extends Service implements LocationListener, Text
     private TextToSpeech tts;
     private final Handler handler=new Handler(Looper.getMainLooper());
     private long lastBackgroundRerouteMs=0L;
+    private volatile long providerEtaMs=0L;
+    private volatile long lastProviderEtaRefreshMs=0L;
     private int backgroundStepIndex=0;
     private final NavigationMapMatcher.State mapMatchState=new NavigationMapMatcher.State();
     private final ArrivalDetector.State arrivalDetectorState=new ArrivalDetector.State();
@@ -91,7 +93,16 @@ public class NavigationService extends Service implements LocationListener, Text
 
         double remainingSeconds=s.planDistanceM>1.0
                 ? s.planDurationS*(remaining/s.planDistanceM):0.0;
-        long eta=System.currentTimeMillis()+(long)(remainingSeconds*1000.0);
+        long nowForEta=System.currentTimeMillis();
+        long eta=nowForEta+(long)(remainingSeconds*1000.0);
+        if(providerEtaMs>nowForEta
+                && nowForEta-lastProviderEtaRefreshMs<180_000L){
+            eta=providerEtaMs;
+        }
+        if((s.destLat!=0.0||s.destLon!=0.0)
+                && nowForEta-lastProviderEtaRefreshMs>150_000L){
+            refreshProviderEtaAsync(location,s);
+        }
 
         List<OnlineServices.NavStep> steps=RoutePilotState.loadSteps(this);
         String instruction=s.instruction==null||s.instruction.isEmpty()?"Volg de route":s.instruction;
@@ -134,6 +145,27 @@ public class NavigationService extends Service implements LocationListener, Text
         }
     }
 
+    private void refreshProviderEtaAsync(Location location, RoutePilotState.Snapshot s){
+        RoutingProviderSettings settings=RoutingProviderSettings.load(this);
+        if(!settings.useHere())return;
+        final double lat=location.getLatitude(),lon=location.getLongitude();
+        final double dLat=s.destLat,dLon=s.destLon;
+        final String label=s.destination;
+        lastProviderEtaRefreshMs=System.currentTimeMillis();
+        new Thread(() -> {
+            try{
+                OnlineServices.SearchResult destination=
+                        new OnlineServices.SearchResult(dLat,dLon,label);
+                double seconds=HereRoutingService.estimateDurationSeconds(
+                        NavigationService.this,lat,lon,destination,
+                        VehicleProfile.load(NavigationService.this),settings);
+                providerEtaMs=System.currentTimeMillis()+(long)(seconds*1000.0);
+            }catch(Exception ignored){
+                providerEtaMs=0L;
+            }
+        }).start();
+    }
+
     private void rerouteInBackground(Location location, RoutePilotState.Snapshot s){
         if(s.destLat==0.0 && s.destLon==0.0)return;
         new Thread(() -> {
@@ -147,6 +179,8 @@ public class NavigationService extends Service implements LocationListener, Text
                 RoutePilotState.savePlan(NavigationService.this,p.route,destination);
                 RoutePilotStore.savePlannedRoute(NavigationService.this,p.route.points);
                 backgroundStepIndex=0;
+                providerEtaMs=0L;
+                lastProviderEtaRefreshMs=0L;
                 mapMatchState.reset();
                 arrivalDetectorState.reset();
                 RoutePilotState.update(NavigationService.this,true,
