@@ -3,7 +3,7 @@ name: Build RoutePilot APK
 on:
   push:
     branches:
-      - routepilot-v3.2-simulator
+      - routepilot-v3.3-routing-core
     paths:
       - 'routepilot/**'
       - 'routepilot-simulator/**'
@@ -38,17 +38,17 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Test + build V3.2.0 debug APK
+      - name: Test + build V3.3.0 debug APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk RoutePilot-V3.2.0-debug.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk RoutePilot-V3.3.0-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V3.2.0-debug-apk
-          path: routepilot/RoutePilot-V3.2.0-debug.apk
+          name: RoutePilot-V3.3.0-debug-apk
+          path: routepilot/RoutePilot-V3.3.0-debug.apk
           if-no-files-found: error
 
 
