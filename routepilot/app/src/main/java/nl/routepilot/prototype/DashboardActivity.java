@@ -74,6 +74,6 @@ public class DashboardActivity extends Activity {
 
     private static String esc(String s){
         if(s==null)return "";
-        return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace(""","&quot;");
+        return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;");
     }
 }
