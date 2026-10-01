@@ -37,25 +37,24 @@ public final class RouteCoordinator {
         if(!selected.analysis.destinationOnRight
                 && selected.route.liveClosureCount()==0
                 && selected.route.criticalCount()==0){
+            Prepared base=selected;
             try{
                 OnlineServices.RouteResult reversed=OnlineServices.reverseApproachCandidate(
                         start.getLatitude(),start.getLongitude(),
-                        destination.lat,destination.lon,selected.route);
+                        destination.lat,destination.lon,base.route);
                 Prepared rp=enrich(context,reversed,destination,vehicle);
-                if(rp.analysis.destinationOnRight
-                        && rp.route.liveClosureCount()==0
-                        && rp.route.criticalCount()==0
-                        && rp.analysis.score>=Math.max(45,selected.analysis.score-18)){
+
+                if(isPracticalDoorApproach(base,rp)){
                     rp.reversedForDoor=true;
-                    rp.route.selectionNote="Andere aanrijrichting gekozen voor rechterdeur aan ingangzijde.";
+                    rp.route.selectionNote="Andere legale en praktische aanrijrichting gekozen voor rechterdeur aan ingangzijde.";
                     selected=rp;
-                }else if(!rp.analysis.destinationOnRight){
+                }else{
                     selected.note=append(selected.note,
-                            "Rechterdeur-aan-ingang kon niet veilig met de beschikbare routevarianten worden afgedwongen.");
+                            "Rechterdeurvoorkeur losgelaten: andere aanrijrichting was niet praktisch, niet veiliger of niet logisch bereikbaar.");
                 }
             }catch(Exception e){
                 selected.note=append(selected.note,
-                        "Rechterdeur-aan-ingang kon niet met een extra aanrijroute worden bevestigd.");
+                        "Rechterdeurvoorkeur losgelaten: geen bruikbare alternatieve aanrijrichting beschikbaar.");
             }
         }
 
@@ -102,11 +101,14 @@ public final class RouteCoordinator {
                 int bIllegal=b.route.liveClosureCount()*100+b.route.criticalCount()*20;
                 if(aIllegal!=bIllegal)return Integer.compare(aIllegal,bIllegal);
 
-                if(a.analysis.destinationOnRight!=b.analysis.destinationOnRight)
-                    return a.analysis.destinationOnRight?-1:1;
-
                 if(a.analysis.score!=b.analysis.score)
                     return Integer.compare(b.analysis.score,a.analysis.score);
+
+                if(a.analysis.uTurns!=b.analysis.uTurns)
+                    return Integer.compare(a.analysis.uTurns,b.analysis.uTurns);
+
+                if(a.analysis.destinationOnRight!=b.analysis.destinationOnRight)
+                    return a.analysis.destinationOnRight?-1:1;
 
                 return Double.compare(a.route.durationSeconds,b.route.durationSeconds);
             }
@@ -114,9 +116,36 @@ public final class RouteCoordinator {
         Prepared p=all.get(0);
         if(all.size()>1){
             p.route.selectionNote=append(p.route.selectionNote,
-                    "Beste van "+all.size()+" routevarianten op voertuig, live hinder, aankomstzijde en leerdata.");
+                    "Beste van "+all.size()+" routevarianten op veiligheid, voertuig, live hinder en leerdata; aankomstzijde is alleen voorkeur.");
         }
         return p;
+    }
+
+    private static boolean isPracticalDoorApproach(Prepared base, Prepared candidate){
+        if(base==null||candidate==null) return false;
+        if(!candidate.analysis.destinationOnRight) return false;
+
+        // OSRM levert alleen een route die volgens de kaartgrafiek berijdbaar is.
+        // Daardoor wordt een onmogelijke tegenrichting in een eenrichtingsstraat niet afgedwongen.
+        if(candidate.route.liveClosureCount()>base.route.liveClosureCount()) return false;
+        if(candidate.route.criticalCount()>base.route.criticalCount()) return false;
+
+        // Geen extra keerbewegingen creëren puur voor de deurzijde.
+        if(candidate.analysis.uTurns>base.analysis.uTurns) return false;
+
+        // Rechterdeur mag geen duidelijk slechtere veiligheidsroute opleveren.
+        if(candidate.analysis.score<base.analysis.score-4) return false;
+        if(candidate.analysis.learnedPenalty>base.analysis.learnedPenalty+4) return false;
+
+        // Geen absurde omweg: maximaal 20%, 1,5 km én 3 minuten extra.
+        double extraDistance=candidate.route.distanceMeters-base.route.distanceMeters;
+        double extraSeconds=candidate.route.durationSeconds-base.route.durationSeconds;
+        if(candidate.route.distanceMeters>base.route.distanceMeters*1.20) return false;
+        if(extraDistance>1500.0) return false;
+        if(candidate.route.durationSeconds>base.route.durationSeconds*1.20) return false;
+        if(extraSeconds>180.0) return false;
+
+        return true;
     }
 
     private static void applyFormalSignRestrictions(OnlineServices.RouteResult route,
