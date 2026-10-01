@@ -1,4 +1,4 @@
-const state={scenarios:[],corrections:[],selected:null,altIndex:0,routeLayer:null,altLayers:[],correctionLayer:null,picked:null,correctionMode:false,showCorrections:true,token:localStorage.getItem('routepilot_token')||''};
+const state={scenarios:[],corrections:[],driverTrips:[],selected:null,selectedDriver:null,altIndex:0,routeLayer:null,altLayers:[],correctionLayer:null,picked:null,correctionMode:false,showCorrections:true,token:localStorage.getItem('routepilot_token')||''};
 const el=id=>document.getElementById(id);
 const map=L.map('map',{zoomControl:true}).setView([51.5555,5.0913],12.5);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
@@ -31,14 +31,47 @@ function toast(msg,bad=false){
 }
 async function refresh(){
   try{
-    const [s,c,stats]=await Promise.all([api('/api/scenarios?limit=300'),api('/api/corrections'),api('/api/stats')]);
-    state.scenarios=s.scenarios;state.corrections=c.corrections;
-    renderScenarios();renderCorrections();renderStats(stats);drawCorrections();
+    const [s,c,d,stats]=await Promise.all([api('/api/scenarios?limit=300'),api('/api/corrections'),api('/api/driver-trips?limit=60'),api('/api/stats')]);
+    state.scenarios=s.scenarios;state.corrections=c.corrections;state.driverTrips=d.driver_trips||[];
+    renderScenarios();renderDriverTrips();renderCorrections();renderStats(stats);drawCorrections();
   }catch(e){toast(e.message,true)}
 }
 function renderStats(x){
   el('statTotal').textContent=x.total;el('statAccepted').textContent=x.accepted;
   el('statRejected').textContent=x.rejected;el('statCorrections').textContent=x.corrections;
+  el('statDriverTrips').textContent=x.driver_trips||0;
+}
+function renderDriverTrips(){
+  const rows=state.driverTrips||[];
+  el('driverTripList').innerHTML=rows.slice(0,20).map(x=>{
+    const delta=(Number(x.actual_distance_m||0)-Number(x.planned_distance_m||0));
+    return '<div class="scenario '+(state.selectedDriver&&state.selectedDriver.id===x.id?'selected':'')+'" data-driver="'+x.id+'">'
+      +'<div class="scenario-top"><span>'+esc(x.destination||'WMO-rit')+'</span><span>ECHT</span></div>'
+      +'<div class="scenario-meta"><span>'+km(x.actual_distance_m||0)+'</span><span>'+(delta>=0?'+':'')+km(delta)+'</span><span>'+Number(x.reroutes||0)+' reroutes</span></div></div>';
+  }).join('')||'<div class="hint">Nog geen echte ritten ontvangen.</div>';
+  document.querySelectorAll('[data-driver]').forEach(n=>n.onclick=()=>openDriverTrip(Number(n.dataset.driver)));
+}
+function openDriverTrip(id){
+  const x=(state.driverTrips||[]).find(t=>Number(t.id)===Number(id));if(!x)return;
+  state.selectedDriver=x;state.selected=null;renderDriverTrips();renderScenarios();
+  clearRouteLayers();
+  const planned=(x.planned_points||[]).map(p=>[p[0],p[1]]);
+  const actual=(x.actual_points||[]).map(p=>[p[0],p[1]]);
+  if(planned.length){
+    const l=L.polyline(planned,{color:'#38bdf8',weight:6,opacity:.9,dashArray:'10 7'}).addTo(map);
+    state.altLayers.push(l);
+  }
+  if(actual.length){
+    state.routeLayer=L.polyline(actual,{color:'#fb923c',weight:7,opacity:.95,lineCap:'round'}).addTo(map);
+    state.routeLayer.on('click',ev=>{if(state.correctionMode)pickLocation(ev.latlng)});
+  }
+  const layers=[...state.altLayers,...(state.routeLayer?[state.routeLayer]:[])];
+  if(layers.length){
+    const group=L.featureGroup(layers);map.fitBounds(group.getBounds(),{padding:[45,45]});
+  }
+  el('emptyState').classList.add('hidden');
+  el('detailPanel').classList.add('hidden');
+  toast('Blauw = gepland • oranje = werkelijk gereden');
 }
 function renderScenarios(){
   const f=el('filter').value;
