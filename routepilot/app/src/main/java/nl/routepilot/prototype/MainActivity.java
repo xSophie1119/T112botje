@@ -573,6 +573,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                 .append(currentRoute.cautionCount()).append(" aandachtspunt(en)");
         if (live > 0) b.append("\n📡 ").append(live).append(" actuele NDW-verkeersmelding(en)");
         if (signs > 0) b.append("\n🛑 ").append(signs).append(" officiële NDW-borden langs route");
+        if (currentRoute.officialSpeeds != null && !currentRoute.officialSpeeds.isEmpty())
+            b.append("\n🚦 WKD-wegvaksnelheden geladen (dag/nachtlaag)");
 
         int busInfo = 0;
         for (OnlineServices.Restriction r : currentRoute.restrictions)
@@ -670,7 +672,13 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         long etaMs = System.currentTimeMillis() + (long)(remainingSeconds * 1000);
         String etaText = new SimpleDateFormat("HH:mm", NL).format(new Date(etaMs));
 
-        currentSpeedLimit = RoadDataService.speedLimitAt(routeIndex, currentRoute.roadSigns);
+        Integer wkdSpeed = null;
+        if (routeIndex >= 0 && routeIndex < currentRoute.points.size()) {
+            wkdSpeed = OfficialSpeedService.speedLimitAt(
+                    currentRoute.points.get(routeIndex), currentRoute.officialSpeeds);
+        }
+        Integer signSpeed = RoadDataService.speedLimitAt(routeIndex, currentRoute.roadSigns);
+        currentSpeedLimit = wkdSpeed != null ? wkdSpeed : (signSpeed == null ? -1 : signSpeed);
         if (currentSpeedLimit <= 0) navSpeed.setText("MAX —");
         else navSpeed.setText("MAX " + currentSpeedLimit);
 
