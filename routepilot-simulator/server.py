@@ -690,18 +690,30 @@ def simulate_pair(batch_id, origin, destination, corrections):
     return success
 
 
-def simulate_batch(count, seed):
-    count=max(1,min(200,int(count)))
-    rng=random.Random(seed)
-    batch_id=f"sim-{int(time.time())}-{rng.randint(1000,9999)}"
+def _update_batch(batch_id, *, status=None, stage=None, completed=None,
+                  success=None, errors=None, message=None):
+    fields=[];values=[]
+    for key,value in (
+        ("status",status),("stage",stage),("completed_count",completed),
+        ("success_count",success),("error_count",errors),("message",message),
+    ):
+        if value is not None:
+            fields.append(key+"=?");values.append(value)
+    fields.append("updated_at=?");values.append(now_ms())
+    values.append(batch_id)
+    with db_lock,db() as con:
+        con.execute(
+            "UPDATE batch_runs SET "+",".join(fields)+" WHERE batch_id=?",
+            tuple(values)
+        )
 
-    locations=build_training_location_pool(rng,count)
-    pairs=[]
-    used=set()
-    max_pairs=len(locations)*(len(locations)-1)
-    attempts=0
-    while len(pairs)<count and attempts<max(2000,count*80):
-        attempts+=1
+def _batch_snapshot(batch_id):
+    with db_lock,db() as con:
+        row=con.execute("SELECT * FROM batch_runs WHERE batch_id=?",(batch_id,)).fetchone()
+    return dict(row) if row else None
+
+def _pick_pair(rng,locations,used):
+    for _ in range(500):
         a,b=rng.sample(range(len(locations)),2)
         key=(a,b)
         if key in used:
@@ -711,24 +723,176 @@ def simulate_batch(count, seed):
         if direct<700.0 or direct>32000.0:
             continue
         used.add(key)
-        pairs.append((origin,destination))
+        return origin,destination
+    return None
 
-    if len(pairs)<count:
-        raise RuntimeError(
-            f"Slechts {len(pairs)} betrouwbare concrete ritparen gevonden; gevraagd: {count}."
+def run_batch(batch_id,count,seed):
+    rng=random.Random(seed)
+    completed=success=errors=0
+    try:
+        _update_batch(
+            batch_id,status="running",stage="Bestemmingen verzamelen",
+            message="Concrete PDOK/BAG-adressen voorbereiden…"
         )
 
-    corrections=active_corrections()
-    workers=max(1,min(6,int(os.environ.get("ROUTEPILOT_SIM_WORKERS","4"))))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures=[pool.submit(simulate_pair,batch_id,a,b,corrections) for a,b in pairs]
-        for f in as_completed(futures):
-            f.result()
+        def progress(stage,message):
+            _update_batch(batch_id,stage=stage,message=message)
+
+        locations=build_training_location_pool(rng,count,progress=progress)
+        _update_batch(
+            batch_id,stage="Routes simuleren",
+            message=f"{len(locations)} concrete bestemmingen klaar. Routes worden berekend."
+        )
+
+        corrections=active_corrections()
+        workers=max(1,min(6,int(os.environ.get("ROUTEPILOT_SIM_WORKERS","4"))))
+        used=set()
+        max_attempts=max(count*4,count+12)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while success<count and completed<max_attempts:
+                need=count-success
+                wave_size=min(workers,need,max_attempts-completed)
+                pairs=[]
+                for _ in range(wave_size):
+                    pair=_pick_pair(rng,locations,used)
+                    if pair is None:
+                        break
+                    pairs.append(pair)
+                if not pairs:
+                    break
+
+                futures=[
+                    pool.submit(simulate_pair,batch_id,a,b,corrections)
+                    for a,b in pairs
+                ]
+                for future in as_completed(futures):
+                    completed+=1
+                    try:
+                        ok=bool(future.result())
+                    except Exception:
+                        ok=False
+                    if ok:
+                        success+=1
+                    else:
+                        errors+=1
+                    _update_batch(
+                        batch_id,
+                        completed=completed,success=success,errors=errors,
+                        stage="Routes simuleren",
+                        message=(
+                            f"{success}/{count} geldige ritten • "
+                            f"{errors} afgekeurd • {completed} pogingen"
+                        )
+                    )
+
+        if success>=count:
+            _update_batch(
+                batch_id,status="completed",stage="Klaar",
+                completed=completed,success=success,errors=errors,
+                message=f"{success} geldige trainingsritten klaar."
+            )
+        elif success>0:
+            _update_batch(
+                batch_id,status="partial",stage="Gedeeltelijk klaar",
+                completed=completed,success=success,errors=errors,
+                message=(
+                    f"{success}/{count} geldige ritten. "
+                    "Niet genoeg betrouwbare paren binnen de veiligheidsgrenzen."
+                )
+            )
+        else:
+            _update_batch(
+                batch_id,status="failed",stage="Mislukt",
+                completed=completed,success=0,errors=errors,
+                message="Geen enkele betrouwbare trainingsrit kon worden gemaakt."
+            )
+    except Exception as exc:
+        _update_batch(
+            batch_id,status="failed",stage="Mislukt",
+            completed=completed,success=success,errors=errors,
+            message=str(exc)[:500]
+        )
+
+def create_batch(count,seed):
+    count=max(1,min(200,int(count)))
+    seed=int(seed)
+    rng=random.Random(seed ^ int(time.time()*1000))
+    batch_id=f"sim-{int(time.time())}-{rng.randint(1000,9999)}"
+    stamp=now_ms()
+    with db_lock,db() as con:
+        con.execute(
+            """INSERT INTO batch_runs(
+            batch_id,status,stage,requested_count,completed_count,success_count,
+            error_count,message,seed,created_at,updated_at
+            ) VALUES(?,?,?,?,0,0,0,?,?,?,?)""",
+            (batch_id,"queued","Wachten",count,"Batch wordt gestart…",seed,stamp,stamp)
+        )
+    thread=threading.Thread(
+        target=run_batch,args=(batch_id,count,seed),
+        name="routepilot-sim-"+batch_id,daemon=True
+    )
+    thread.start()
     return batch_id
+
+def source_status():
+    result={
+        "pdok":{"ok":False,"detail":""},
+        "osrm":{"ok":False,"detail":""},
+        "cache":{"locations":0,"routes":0},
+    }
+    with db_lock,db() as con:
+        result["cache"]["locations"]=con.execute(
+            "SELECT COUNT(*) FROM training_locations"
+        ).fetchone()[0]
+        result["cache"]["routes"]=con.execute(
+            "SELECT COUNT(*) FROM route_cache"
+        ).fetchone()[0]
+
+    try:
+        params={
+            "q":"*:*","rows":"1","lat":"51.5555","lon":"5.0913",
+            "fq":"type:adres","fl":"weergavenaam,centroide_ll","wt":"json",
+        }
+        req=urllib.request.Request(
+            PDOK_FREE+"?"+urllib.parse.urlencode(params),
+            headers={"User-Agent":USER_AGENT,"Accept":"application/json"}
+        )
+        started=time.time()
+        with urllib.request.urlopen(req,timeout=5) as resp:
+            root=json.loads(resp.read().decode("utf-8"))
+        docs=((root.get("response") or {}).get("docs") or [])
+        if docs:
+            result["pdok"]={
+                "ok":True,
+                "detail":f"PDOK/BAG bereikbaar ({(time.time()-started)*1000:.0f} ms)"
+            }
+    except Exception as exc:
+        result["pdok"]["detail"]="PDOK/BAG fout: "+str(exc)[:160]
+
+    try:
+        url=(
+            ROUTER+"/nearest/v1/driving/5.0913,51.5555"
+            "?number=1"
+        )
+        req=urllib.request.Request(
+            url,headers={"User-Agent":USER_AGENT,"Accept":"application/json"}
+        )
+        started=time.time()
+        with urllib.request.urlopen(req,timeout=5) as resp:
+            root=json.loads(resp.read().decode("utf-8"))
+        if root.get("code")=="Ok":
+            result["osrm"]={
+                "ok":True,
+                "detail":f"OSRM bereikbaar ({(time.time()-started)*1000:.0f} ms)"
+            }
+    except Exception as exc:
+        result["osrm"]["detail"]="OSRM fout: "+str(exc)[:160]
+    return result
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.3.2"
+    server_version = "RoutePilotSimulator/3.4.0"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -762,7 +926,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.3.2", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.4.0", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/corrections" or path == "/api/corrections/export":
             return self.send_json({"version": 1, "generated_at": now_ms(), "corrections": active_corrections()})
@@ -966,7 +1130,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.3.2 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.4.0 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
