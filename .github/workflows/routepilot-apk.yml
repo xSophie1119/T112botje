@@ -73,7 +73,7 @@ jobs:
           node --check routepilot-simulator/static/core.js
           node --check routepilot-simulator/static/app.js
           python - <<'PY'
-          import importlib.util, pathlib, tempfile, os
+          import importlib.util, pathlib, tempfile, os, random
           p = pathlib.Path('routepilot-simulator/server.py')
           os.environ['ROUTEPILOT_SIM_DB'] = str(pathlib.Path(tempfile.gettempdir()) / 'routepilot-sim-ci.sqlite3')
           spec = importlib.util.spec_from_file_location('rp_sim', p)
