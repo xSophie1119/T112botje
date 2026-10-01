@@ -93,12 +93,12 @@ jobs:
         run: |
           test -f routepilot-simulator/START_SIMULATOR_LAN.bat
           test -f routepilot-simulator/server.py
-          mkdir -p RoutePilot-V3.3.0-PC
-          cp -R routepilot-simulator/* RoutePilot-V3.3.0-PC/
+          mkdir -p RoutePilot-V3.3.1-PC
+          cp -R routepilot-simulator/* RoutePilot-V3.3.1-PC/
 
       - name: Upload Windows simulator package
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V3.3.0-PC-Simulator
-          path: RoutePilot-V3.3.0-PC
+          name: RoutePilot-V3.3.1-PC-Simulator
+          path: RoutePilot-V3.3.1-PC
           if-no-files-found: error
