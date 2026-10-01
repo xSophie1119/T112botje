@@ -153,7 +153,8 @@ public final class MunicipalityService {
     }
 
     private static boolean conservativeFallback(double lat, double lon) {
-        return lat >= 51.50 && lat <= 51.68 && lon >= 4.98 && lon <= 5.22;
+        // Ontheffing is juridisch gebiedsgebonden: bij twijfel nooit aannemen dat hij geldt.
+        return false;
     }
 
     private static String get(String raw) throws Exception {
