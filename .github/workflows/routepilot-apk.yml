@@ -70,6 +70,8 @@ jobs:
           test -f routepilot-simulator/static/core.js
           test -f routepilot-simulator/static/app.js
           test -f routepilot-simulator/static/style.css
+          node --check routepilot-simulator/static/core.js
+          node --check routepilot-simulator/static/app.js
           python - <<'PY'
           import importlib.util, pathlib, tempfile, os
           p = pathlib.Path('routepilot-simulator/server.py')
@@ -79,7 +81,14 @@ jobs:
           spec.loader.exec_module(mod)
           assert len(mod.ANCHORS) >= 20
           assert mod.route_score({'distance': 1000, 'duration': 100, 'geometry': {'coordinates': [[5.09,51.55],[5.10,51.56]]}}, [])[0] > 0
-          print('simulator smoke test ok')
+          batch = mod.create_batch(1, 12345)
+          snap = mod._batch_snapshot(batch)
+          assert snap is not None
+          assert snap['requested_count'] == 1
+          assert snap['status'] in ('queued','running','completed','partial','failed')
+          point = mod._parse_wkt_point('POINT(5.0913 51.5555)')
+          assert point == (51.5555, 5.0913)
+          print('simulator async smoke test ok')
           PY
 
 
@@ -93,12 +102,12 @@ jobs:
         run: |
           test -f routepilot-simulator/START_SIMULATOR_LAN.bat
           test -f routepilot-simulator/server.py
-          mkdir -p RoutePilot-V3.3.2-PC
-          cp -R routepilot-simulator/* RoutePilot-V3.3.2-PC/
+          mkdir -p RoutePilot-V3.4.0-PC
+          cp -R routepilot-simulator/* RoutePilot-V3.4.0-PC/
 
       - name: Upload Windows simulator package
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V3.3.2-PC-Simulator
-          path: RoutePilot-V3.3.2-PC
+          name: RoutePilot-V3.4.0-PC-Simulator
+          path: RoutePilot-V3.4.0-PC
           if-no-files-found: error
