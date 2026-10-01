@@ -187,28 +187,56 @@ def haversine_m(a_lat, a_lon, b_lat, b_lon):
     return 2 * r * math.asin(min(1, math.sqrt(h)))
 
 
+PDOK_FREE="https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"
+TRAINING_LOCATION_TTL_MS=30*24*3600*1000
 _training_location_cache={}
 _training_location_lock=threading.Lock()
 
-def _element_point(element):
-    if "lat" in element and "lon" in element:
-        return float(element["lat"]),float(element["lon"])
-    center=element.get("center") or {}
-    if "lat" in center and "lon" in center:
-        return float(center["lat"]),float(center["lon"])
-    return None
+def _parse_wkt_point(value):
+    text=str(value or "").strip()
+    if not text.upper().startswith("POINT(") or not text.endswith(")"):
+        return None
+    try:
+        parts=text[text.find("(")+1:-1].strip().split()
+        if len(parts)<2:
+            return None
+        lon=float(parts[0]);lat=float(parts[1])
+        return lat,lon
+    except Exception:
+        return None
 
-def _location_label(tags, area_name):
-    name=str(tags.get("name","") or "").strip()
-    street=str(tags.get("addr:street","") or "").strip()
-    number=str(tags.get("addr:housenumber","") or "").strip()
-    city=str(tags.get("addr:city","") or "Tilburg").strip()
-    if name:
-        address=(" ".join(x for x in (street,number) if x)).strip()
-        return f"{name} · {address}" if address else f"{name} · {area_name}"
-    if street and number:
-        return f"{street} {number}, {city}"
-    return ""
+def _cached_training_locations(area_name):
+    cutoff=now_ms()-TRAINING_LOCATION_TTL_MS
+    with db_lock,db() as con:
+        fresh=con.execute(
+            "SELECT name,lat,lon,source,area_name FROM training_locations "
+            "WHERE area_name=? AND created_at>=? ORDER BY name LIMIT 80",
+            (area_name,cutoff)
+        ).fetchall()
+        if fresh:
+            return [dict(r) for r in fresh]
+        stale=con.execute(
+            "SELECT name,lat,lon,source,area_name FROM training_locations "
+            "WHERE area_name=? ORDER BY created_at DESC LIMIT 80",
+            (area_name,)
+        ).fetchall()
+    return [dict(r) for r in stale]
+
+def _store_training_locations(area_name,items):
+    if not items:
+        return
+    stamp=now_ms()
+    with db_lock,db() as con:
+        for item in items:
+            key_raw=f"{item['name']}|{item['lat']:.6f}|{item['lon']:.6f}"
+            key=hashlib.sha256(key_raw.encode()).hexdigest()
+            con.execute(
+                "INSERT OR REPLACE INTO training_locations("
+                "cache_key,name,lat,lon,source,area_name,created_at"
+                ") VALUES(?,?,?,?,?,?,?)",
+                (key,item["name"],item["lat"],item["lon"],
+                 item.get("source","PDOK"),area_name,stamp)
+            )
 
 def discover_training_locations(anchor):
     area_name,lat,lon=anchor
@@ -218,85 +246,109 @@ def discover_training_locations(anchor):
     if cached is not None:
         return list(cached)
 
-    query=(
-        f'[out:json][timeout:12];('
-        f'nwr(around:850,{lat:.6f},{lon:.6f})["addr:housenumber"]["addr:street"];'
-        f'nwr(around:850,{lat:.6f},{lon:.6f})["healthcare"];'
-        f'nwr(around:850,{lat:.6f},{lon:.6f})["social_facility"];'
-        f'nwr(around:850,{lat:.6f},{lon:.6f})["amenity"~"hospital|clinic|doctors|community_centre|nursing_home"];'
-        f');out center tags;'
-    )
-    payload=urllib.parse.urlencode({"data":query}).encode("utf-8")
+    disk=_cached_training_locations(area_name)
+    fresh_cutoff=now_ms()-TRAINING_LOCATION_TTL_MS
+    # Als er genoeg verse cache is, geen netwerkcall nodig.
+    with db_lock,db() as con:
+        fresh_count=con.execute(
+            "SELECT COUNT(*) FROM training_locations WHERE area_name=? AND created_at>=?",
+            (area_name,fresh_cutoff)
+        ).fetchone()[0]
+    if fresh_count>=12 and disk:
+        result=[{"name":r["name"],"lat":r["lat"],"lon":r["lon"],
+                 "area":area_name,"source":r["source"]} for r in disk]
+        with _training_location_lock:
+            _training_location_cache[key]=list(result)
+        return result
+
+    params={
+        "q":"*:*",
+        "rows":"70",
+        "lat":f"{lat:.7f}",
+        "lon":f"{lon:.7f}",
+        "fq":"type:adres",
+        "fl":"weergavenaam,centroide_ll,type,gemeentenaam",
+        "wt":"json",
+    }
+    url=PDOK_FREE+"?"+urllib.parse.urlencode(params)
     req=urllib.request.Request(
-        "https://overpass-api.de/api/interpreter",
-        data=payload,
-        headers={
-            "User-Agent":USER_AGENT,
-            "Accept":"application/json",
-            "Content-Type":"application/x-www-form-urlencoded; charset=UTF-8",
-        },
-        method="POST",
+        url,
+        headers={"User-Agent":USER_AGENT,"Accept":"application/json"},
     )
-    with urllib.request.urlopen(req,timeout=15) as resp:
-        root=json.loads(resp.read().decode("utf-8"))
 
     found=[]
-    seen=set()
-    for element in root.get("elements",[]):
-        point=_element_point(element)
-        if not point:
-            continue
-        tags=element.get("tags") or {}
-        label=_location_label(tags,area_name)
-        if not label:
-            continue
-        la,lo=point
-        if haversine_m(lat,lon,la,lo)>950:
-            continue
-        k=(label.lower(),round(la,5),round(lo,5))
-        if k in seen:
-            continue
-        seen.add(k)
-        care=bool(tags.get("healthcare") or tags.get("social_facility")
-                  or str(tags.get("amenity","")) in (
-                      "hospital","clinic","doctors","community_centre","nursing_home"))
-        found.append({
-            "name":label,"lat":la,"lon":lo,
-            "area":area_name,"care":care,
-        })
+    try:
+        with urllib.request.urlopen(req,timeout=9) as resp:
+            root=json.loads(resp.read().decode("utf-8"))
+        docs=((root.get("response") or {}).get("docs") or [])
+        seen=set()
+        for doc in docs:
+            point=_parse_wkt_point(doc.get("centroide_ll"))
+            name=str(doc.get("weergavenaam","") or "").strip()
+            if not point or not name:
+                continue
+            la,lo=point
+            dist=haversine_m(lat,lon,la,lo)
+            if dist>1800.0:
+                continue
+            k=(name.lower(),round(la,6),round(lo,6))
+            if k in seen:
+                continue
+            seen.add(k)
+            found.append({
+                "name":name,
+                "lat":la,
+                "lon":lo,
+                "area":area_name,
+                "source":"PDOK/BAG",
+                "distance_m":dist,
+            })
+        found.sort(key=lambda x:x["distance_m"])
+        found=found[:50]
+        _store_training_locations(area_name,found)
+    except Exception:
+        # Offline of PDOK tijdelijk traag: gebruik eerder gecachte BAG-adressen.
+        found=[{"name":r["name"],"lat":r["lat"],"lon":r["lon"],
+                "area":area_name,"source":r["source"]} for r in disk]
 
-    # Zorglocaties eerst, daarna gewone echte adressen. Cap om de pool klein
-    # en stabiel te houden.
-    found.sort(key=lambda x:(not x["care"],x["name"].lower()))
-    found=found[:36]
+    if not found:
+        raise RuntimeError(f"Geen concrete PDOK/BAG-adressen beschikbaar rond {area_name}.")
+
     with _training_location_lock:
         _training_location_cache[key]=list(found)
     return found
 
-def build_training_location_pool(rng,count):
+def build_training_location_pool(rng,count,progress=None):
     anchors=list(ANCHORS)
     rng.shuffle(anchors)
-    target=max(18,min(70,12+count//2))
+    target=max(30,min(120,24+count))
     pool=[]
     seen=set()
-    for anchor in anchors:
+
+    for idx,anchor in enumerate(anchors):
+        if progress:
+            progress(
+                "Bestemmingen verzamelen",
+                f"PDOK/BAG-adressen ophalen rond {anchor[0]} ({idx+1}/{len(anchors)})"
+            )
         try:
             items=discover_training_locations(anchor)
         except Exception:
             continue
         rng.shuffle(items)
-        for item in items[:10]:
-            key=(item["name"].lower(),round(item["lat"],5),round(item["lon"],5))
+        for item in items[:14]:
+            key=(item["name"].lower(),round(item["lat"],6),round(item["lon"],6))
             if key in seen:
                 continue
             seen.add(key)
             pool.append((item["name"],item["lat"],item["lon"]))
             if len(pool)>=target:
                 return pool
-    if len(pool)<8:
+
+    if len(pool)<12:
         raise RuntimeError(
-            "Te weinig concrete publieke adressen/POI's gevonden voor betrouwbare training. "
-            "Probeer later opnieuw wanneer Overpass beschikbaar is."
+            "Te weinig concrete BAG-adressen beschikbaar. "
+            "Controleer internetverbinding of probeer de broncheck."
         )
     return pool
 
