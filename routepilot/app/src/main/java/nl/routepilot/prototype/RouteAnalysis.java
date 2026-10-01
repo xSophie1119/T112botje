@@ -55,6 +55,21 @@ public final class RouteAnalysis {
         r.doorPreferenceSuppressed=PortalCorrectionStore.ignoreDoorSide(
                 c,destination.lat,destination.lon);
 
+        if(route.providerCriticalNotices>0){
+            score-=Math.min(80,route.providerCriticalNotices*45);
+            r.reasons.add(route.providerCriticalNotices+" kritieke router-providerwaarschuwing(en)");
+        }
+        if(route.providerVehicleAware){
+            r.reasons.add(route.providerName+" hield al tijdens routering rekening met voertuigafmetingen");
+        }else{
+            r.reasons.add(route.providerName+" is generieke basisrouter; RoutePilot valideert achteraf");
+        }
+        if(route.ndwAccessibilityChecked){
+            if(route.ndwAccessibilityHardHits>0)
+                r.reasons.add(route.ndwAccessibilityHardHits+" officiële NDW-onbereikbare segment(en) op route");
+            else r.reasons.add("NDW Bereikbaarheidskaart: geen conflicterend wegsegment gevonden");
+        }
+
         if(closures>0){score-=Math.min(80,closures*40);r.reasons.add(closures+" actuele afsluiting(en)");}
         int liveHindrance=0;
         for(LiveTrafficService.TrafficEvent e:route.trafficEvents){
