@@ -47,6 +47,7 @@ public final class RoutePilotStore {
         public double plannedDistanceM, actualDistanceM;
         public int warnings, reroutes;
         public JSONArray points = new JSONArray();
+        public JSONArray plannedPoints = new JSONArray();
     }
 
     public static synchronized void addReport(Context c, String type, String note, double lat, double lon) {
@@ -178,10 +179,34 @@ public final class RoutePilotStore {
             o.put("id",id);o.put("destinationLabel",destination);
             o.put("startedAt",System.currentTimeMillis());o.put("endedAt",0);
             o.put("plannedDistanceM",plannedDistanceM);o.put("actualDistanceM",0);
-            o.put("warnings",0);o.put("reroutes",0);o.put("points",new JSONArray());
+            o.put("warnings",0);o.put("reroutes",0);
+            o.put("points",new JSONArray());
+            o.put("plannedPoints",new JSONArray());
             prefs(c).edit().putString(KEY_ACTIVE,o.toString()).apply();
         }catch(Exception ignored){}
         return id;
+    }
+
+    public static synchronized void savePlannedRoute(Context c, List<GeoPoint> route) {
+        String raw=prefs(c).getString(KEY_ACTIVE,"");
+        if(raw.isEmpty()||route==null)return;
+        try{
+            JSONObject o=new JSONObject(raw);
+            JSONArray arr=new JSONArray();
+            int stride=Math.max(1,route.size()/500);
+            for(int i=0;i<route.size();i+=stride){
+                GeoPoint p=route.get(i);
+                JSONArray pt=new JSONArray();
+                pt.put(p.getLatitude());pt.put(p.getLongitude());arr.put(pt);
+            }
+            if(!route.isEmpty()){
+                GeoPoint p=route.get(route.size()-1);
+                JSONArray pt=new JSONArray();
+                pt.put(p.getLatitude());pt.put(p.getLongitude());arr.put(pt);
+            }
+            o.put("plannedPoints",arr);
+            prefs(c).edit().putString(KEY_ACTIVE,o.toString()).apply();
+        }catch(Exception ignored){}
     }
 
     public static synchronized void appendTrack(Context c,double lat,double lon,float speed){
@@ -239,6 +264,7 @@ public final class RoutePilotStore {
             t.plannedDistanceM=o.optDouble("plannedDistanceM");t.actualDistanceM=o.optDouble("actualDistanceM");
             t.warnings=o.optInt("warnings");t.reroutes=o.optInt("reroutes");
             t.points=o.optJSONArray("points"); if(t.points==null)t.points=new JSONArray();
+            t.plannedPoints=o.optJSONArray("plannedPoints"); if(t.plannedPoints==null)t.plannedPoints=new JSONArray();
             out.add(t);
         }
         return out;
