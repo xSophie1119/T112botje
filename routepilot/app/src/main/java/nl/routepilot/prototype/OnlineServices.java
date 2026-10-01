@@ -23,7 +23,7 @@ import java.util.Set;
 public final class OnlineServices {
 
     public static final String USER_AGENT =
-            "RoutePilot/3.1-debug (WMO navigation prototype; https://github.com/xSophie1119)";
+            "RoutePilot/3.3-debug (WMO navigation; https://github.com/xSophie1119)";
 
     private static final Locale NL = new Locale("nl", "NL");
 
@@ -139,6 +139,13 @@ public final class OnlineServices {
         public List<OfficialSpeedService.SpeedPoint> officialSpeeds = new ArrayList<>();
         public List<BridgeOpeningService.Event> bridgeEvents = new ArrayList<>();
         public List<TemporarySpeedService.Limit> temporarySpeeds = new ArrayList<>();
+        public String providerName = "OSRM";
+        public boolean providerVehicleAware = false;
+        public int providerCriticalNotices = 0;
+        public final List<String> providerNoticeTexts = new ArrayList<>();
+        public boolean ndwAccessibilityChecked = false;
+        public int ndwAccessibilityHardHits = 0;
+        public final List<String> ndwAccessibilityReasons = new ArrayList<>();
         public String selectionNote = "";
 
         public RouteResult(List<GeoPoint> points, double distanceMeters,
@@ -185,6 +192,17 @@ public final class OnlineServices {
             if (cached != null) return cached;
         }
 
+        // Nederlandse adressen eerst via de officiële PDOK Location API.
+        try {
+            SearchResult pdok = PdokLocationService.searchBest(query);
+            synchronized (SEARCH_CACHE) {
+                SEARCH_CACHE.put(query.toLowerCase(Locale.ROOT), pdok);
+            }
+            return pdok;
+        } catch (Exception ignored) {
+            // Voor buitenlandse / niet-adres zoekopdrachten blijft Nominatim fallback.
+        }
+
         synchronized (OnlineServices.class) {
             long wait = 1000L - (System.currentTimeMillis() - lastNominatimRequestMs);
             if (wait > 0) Thread.sleep(wait);
@@ -210,6 +228,28 @@ public final class OnlineServices {
             SEARCH_CACHE.put(query.toLowerCase(Locale.ROOT), result);
         }
         return result;
+    }
+
+    public static List<RouteResult> routeCandidates(android.content.Context context,
+                                                    double fromLat,double fromLon,
+                                                    SearchResult destination,
+                                                    VehicleProfile vehicle) throws Exception {
+        RoutingProviderSettings settings=RoutingProviderSettings.load(context);
+        if(settings.useHere()){
+            try{
+                return HereRoutingService.routeCandidates(
+                        context,fromLat,fromLon,destination,vehicle,settings);
+            }catch(Exception e){
+                List<RouteResult> fallback=routeCandidates(
+                        fromLat,fromLon,destination.lat,destination.lon);
+                for(RouteResult r:fallback){
+                    r.providerName="OSRM fallback";
+                    r.selectionNote="HERE niet beschikbaar; veilige OSRM-fallback gebruikt.";
+                }
+                return fallback;
+            }
+        }
+        return routeCandidates(fromLat,fromLon,destination.lat,destination.lon);
     }
 
     public static List<RouteResult> routeCandidates(double fromLat, double fromLon,
@@ -250,12 +290,15 @@ public final class OnlineServices {
             JSONObject route = routesJson.getJSONObject(i);
             List<GeoPoint> points = parseGeometry(route);
             List<NavStep> steps = parseSteps(route);
-            result.add(new RouteResult(
+            RouteResult parsed=new RouteResult(
                     points,
                     route.optDouble("distance", 0),
                     route.optDouble("duration", 0),
                     steps
-            ));
+            );
+            parsed.providerName="OSRM";
+            parsed.providerVehicleAware=false;
+            result.add(parsed);
         }
         return result;
     }
