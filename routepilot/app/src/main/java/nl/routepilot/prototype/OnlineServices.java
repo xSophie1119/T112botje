@@ -107,6 +107,8 @@ public final class OnlineServices {
         public List<LiveTrafficService.TrafficEvent> trafficEvents = new ArrayList<>();
         public List<RoadDataService.Sign> roadSigns = new ArrayList<>();
         public List<OfficialSpeedService.SpeedPoint> officialSpeeds = new ArrayList<>();
+        public List<BridgeOpeningService.Event> bridgeEvents = new ArrayList<>();
+        public List<TemporarySpeedService.Limit> temporarySpeeds = new ArrayList<>();
         public String selectionNote = "";
 
         public RouteResult(List<GeoPoint> points, double distanceMeters,
@@ -137,6 +139,10 @@ public final class OnlineServices {
                 if (e.closure) n++;
             }
             return n;
+        }
+
+        public int bridgeConflictCount() {
+            return bridgeEvents == null ? 0 : bridgeEvents.size();
         }
     }
 
