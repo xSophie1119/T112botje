@@ -171,7 +171,13 @@ with db() as con:
     # tabel en blijven behouden.
     con.execute(
         "UPDATE scenarios SET generator_version='legacy' "
-        "WHERE generator_version IS NULL OR generator_version='' "
+        "WHERE generator_version IS NULL OR generator_version='' OR generator_version<>'3.4.0'"
+    )
+    con.execute(
+        "UPDATE batch_runs SET status='failed',stage='Onderbroken',"
+        "message='De simulator is opnieuw gestart tijdens deze batch.',updated_at=? "
+        "WHERE status IN ('queued','running')",
+        (now_ms() if 'now_ms' in globals() else int(time.time()*1000),)
     )
 
 
@@ -546,10 +552,21 @@ def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
         "&continue_straight=true&radiuses=55;55"
     )
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    if data.get("code") != "Ok" or not data.get("routes"):
-        raise RuntimeError(data.get("message") or "Geen OSRM-route")
+    last_error=None
+    data=None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data.get("code") == "Ok" and data.get("routes"):
+                break
+            last_error=RuntimeError(data.get("message") or "Geen OSRM-route")
+        except Exception as exc:
+            last_error=exc
+        if attempt<2:
+            time.sleep(0.7*(attempt+1))
+    if not data or data.get("code") != "Ok" or not data.get("routes"):
+        raise RuntimeError("OSRM-route mislukt na retries: "+str(last_error or "onbekend"))
     with db_lock, db() as con:
         con.execute(
             "INSERT OR REPLACE INTO route_cache(cache_key,response_json,created_at) VALUES(?,?,?)",
@@ -977,7 +994,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = con.execute("SELECT * FROM scenarios ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
                 else:
                     rows = con.execute(
-                        "SELECT * FROM scenarios WHERE generator_version<>'legacy' ORDER BY id DESC LIMIT ?",
+                        "SELECT * FROM scenarios WHERE generator_version='3.4.0' ORDER BY id DESC LIMIT ?",
                         (limit,)
                     ).fetchall()
             out = []
@@ -990,10 +1007,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stats":
             with db_lock, db() as con:
-                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy'").fetchone()[0]
-                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy' AND status='accepted'").fetchone()[0]
-                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy' AND status='rejected'").fetchone()[0]
-                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy' AND status='error'").fetchone()[0]
+                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0'").fetchone()[0]
+                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0' AND status='accepted'").fetchone()[0]
+                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0' AND status='rejected'").fetchone()[0]
+                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0' AND status='error'").fetchone()[0]
                 corrections = con.execute("SELECT COUNT(*) FROM corrections WHERE active=1").fetchone()[0]
                 driver_trips = con.execute("SELECT COUNT(*) FROM driver_trips").fetchone()[0]
             return self.send_json({
