@@ -21,6 +21,7 @@ public final class RouteAnalysis {
         public int narrowSignals;
         public int learnedPenalty;
         public int portalAdjustment;
+        public int portalHardHits;
         public boolean doorPreferenceSuppressed;
 
         public String summary(){
@@ -43,6 +44,7 @@ public final class RouteAnalysis {
         r.narrowSignals=countType(route,"SMALLE WEG");
         r.learnedPenalty=RoutePilotStore.learnedPenalty(c,route.points);
         r.portalAdjustment=PortalCorrectionStore.routeAdjustment(c,route.points);
+        r.portalHardHits=PortalCorrectionStore.hardHitCount(c,route.points);
 
         r.approachBearing=approachBearing(route.points);
         PortalCorrectionStore.Correction entrance =
@@ -71,6 +73,9 @@ public final class RouteAnalysis {
         if(r.narrowSignals>0){score-=Math.min(24,r.narrowSignals*5);r.reasons.add(r.narrowSignals+" smalle/krappe weg-signaal(en)");}
         if(r.uTurns>0){score-=Math.min(25,r.uTurns*12);r.reasons.add(r.uTurns+" keerbeweging(en) in route");}
         if(r.learnedPenalty>0){score-=r.learnedPenalty;r.reasons.add("route raakt eerder vermeden punten");}
+        if(r.portalHardHits>0){
+            r.reasons.add(r.portalHardHits+" harde correctieportaal-hit(s)");
+        }
         if(r.portalAdjustment!=0){
             score-=r.portalAdjustment;
             r.reasons.add(r.portalAdjustment>0
