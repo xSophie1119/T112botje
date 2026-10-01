@@ -116,6 +116,18 @@ public final class RouteCoordinator {
         }
 
         try{
+            route.bridgeEvents=BridgeOpeningService.conflictsForRoute(route);
+        }catch(Exception ignored){
+            route.bridgeEvents=new ArrayList<>();
+        }
+
+        try{
+            route.temporarySpeeds=TemporarySpeedService.limitsForRoute(route.points);
+        }catch(Exception ignored){
+            route.temporarySpeeds=new ArrayList<>();
+        }
+
+        try{
             p.destinationAccess=DestinationAccessService.scan(destination,route.points);
         }catch(Exception ignored){
             p.destinationAccess=new DestinationAccessService.Result();
@@ -133,6 +145,9 @@ public final class RouteCoordinator {
                 int aIllegal=a.route.liveClosureCount()*100+a.route.criticalCount()*20;
                 int bIllegal=b.route.liveClosureCount()*100+b.route.criticalCount()*20;
                 if(aIllegal!=bIllegal)return Integer.compare(aIllegal,bIllegal);
+
+                if(a.route.bridgeConflictCount()!=b.route.bridgeConflictCount())
+                    return Integer.compare(a.route.bridgeConflictCount(),b.route.bridgeConflictCount());
 
                 if(a.analysis.score!=b.analysis.score)
                     return Integer.compare(b.analysis.score,a.analysis.score);
@@ -192,7 +207,8 @@ public final class RouteCoordinator {
 
     private static int hardScore(Prepared p){
         if(p==null||p.route==null)return Integer.MAX_VALUE;
-        return p.route.liveClosureCount()*100+p.route.criticalCount()*20;
+        return p.route.liveClosureCount()*100+p.route.criticalCount()*20
+                +p.route.bridgeConflictCount()*12;
     }
 
     private static double[] firstHardPoint(Prepared p){
