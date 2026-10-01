@@ -69,7 +69,14 @@ public class RoutePilotCarAppService extends CarAppService {
             RoutePilotState.Snapshot s=RoutePilotState.get(getCarContext());
             RoutingInfo info;
             if(!s.active || s.instruction==null || s.instruction.isEmpty()){
-                info=new RoutingInfo.Builder().setLoading(true).build();
+                String idleInstruction=s.wmoPhase!=null&&!s.wmoPhase.isEmpty()
+                        ?s.wmoPhase:"RoutePilot gereed";
+                Step idleStep=new Step.Builder(idleInstruction)
+                        .setManeuver(new Maneuver.Builder(Maneuver.TYPE_UNKNOWN).build())
+                        .build();
+                info=new RoutingInfo.Builder()
+                        .setCurrentStep(idleStep,Distance.create(0,Distance.UNIT_METERS))
+                        .build();
             }else{
                 Step step=new Step.Builder(s.instruction)
                         .setManeuver(new Maneuver.Builder(Maneuver.TYPE_UNKNOWN).build())
@@ -156,15 +163,44 @@ public class RoutePilotCarAppService extends CarAppService {
                 }
 
                 RoutePilotState.Snapshot s=RoutePilotState.get(getCarContext());
-                Paint text=new Paint(Paint.ANTI_ALIAS_FLAG);text.setColor(0xfff1f5f9);text.setTextSize(32);
+                Paint text=new Paint(Paint.ANTI_ALIAS_FLAG);
+                text.setColor(0xfff1f5f9);text.setTextSize(31);
                 String footer=s.speedLimit>0
-                        ?"RoutePilot • "+s.speedLimit+" km/u • veiligheid "+s.safetyScore+"/100"
-                        :"RoutePilot • veiligheid "+s.safetyScore+"/100";
+                        ?"RoutePilot • "+s.speedLimit+" km/u • route "+s.safetyScore+"/100"
+                        :"RoutePilot • route "+s.safetyScore+"/100";
                 canvas.drawText(footer,24,h-28,text);
+
+                text.setTextSize(28);
+                float y=44;
+                if(s.wmoPhase!=null&&!s.wmoPhase.isEmpty()){
+                    String phase=s.wmoPhase;
+                    if(s.wmoWaitRemainingMs>0) phase+=" • "+WmoSessionManager.formatWait(s.wmoWaitRemainingMs);
+                    else if(s.wmoWaitExpired) phase+=" • LOOS MOGELIJK";
+                    canvas.drawText(shorten(phase,70),24,y,text);
+                    y+=38;
+                }
+
+                text.setTextSize(23);
+                if(s.warning!=null&&!s.warning.isEmpty()){
+                    canvas.drawText(shorten("WAARSCHUWING • "+s.warning,95),24,y,text);
+                    y+=32;
+                }else if(s.lookAhead!=null&&!s.lookAhead.isEmpty()){
+                    canvas.drawText(shorten(s.lookAhead,95),24,y,text);
+                    y+=32;
+                }
+
+                if(s.arrival!=null&&!s.arrival.isEmpty()){
+                    canvas.drawText(shorten("AANKOMST • "+s.arrival.replace("\n"," • "),95),24,y,text);
+                }
             }catch(Exception ignored){
             }finally{
                 if(canvas!=null)try{surface.unlockCanvasAndPost(canvas);}catch(Exception ignored){}
             }
         }
+        private String shorten(String s,int max){
+            if(s==null)return "";
+            return s.length()<=max?s:s.substring(0,max-1)+"…";
+        }
+
     }
 }
