@@ -133,7 +133,7 @@ public final class RouteCoordinator {
         p.route=route;
 
         CompletableFuture<List<OnlineServices.Restriction>> restrictions=
-                async(() -> OnlineServices.scanRestrictions(route,vehicle));
+                async(() -> OnlineServices.scanRestrictions(context,route,vehicle));
         CompletableFuture<List<LiveTrafficService.TrafficEvent>> traffic=
                 async(() -> LiveTrafficService.eventsNearRoute(route.points));
         CompletableFuture<List<RoadDataService.Sign>> signs=
