@@ -137,12 +137,8 @@ public final class RouteCoordinator {
                 async(() -> LiveTrafficService.eventsNearRoute(route.points));
         CompletableFuture<List<RoadDataService.Sign>> signs=
                 async(() -> RoadDataService.signsNearRoute(route.points));
-        CompletableFuture<List<OfficialSpeedService.SpeedPoint>> speeds=
-                async(() -> OfficialSpeedService.loadForRoute(route.points));
         CompletableFuture<List<BridgeOpeningService.Event>> bridges=
                 async(() -> BridgeOpeningService.conflictsForRoute(route));
-        CompletableFuture<List<TemporarySpeedService.Limit>> tempSpeeds=
-                async(() -> TemporarySpeedService.limitsForRoute(route.points));
         CompletableFuture<DestinationAccessService.Result> access=
                 sharedAccess!=null
                         ? CompletableFuture.completedFuture(sharedAccess)
@@ -159,14 +155,12 @@ public final class RouteCoordinator {
             applyFormalSignRestrictions(route,vehicle);
         }catch(Exception e){p.signScanOk=false;route.roadSigns=new ArrayList<>();}
 
-        try{route.officialSpeeds=speeds.get();}
-        catch(Exception ignored){route.officialSpeeds=new ArrayList<>();}
-
         try{route.bridgeEvents=bridges.get();}
         catch(Exception ignored){route.bridgeEvents=new ArrayList<>();}
 
-        try{route.temporarySpeeds=tempSpeeds.get();}
-        catch(Exception ignored){route.temporarySpeeds=new ArrayList<>();}
+        route.officialSpeeds=new ArrayList<>();
+        route.temporarySpeeds=new ArrayList<>();
+        hydrateDrivingDataAsync(route);
 
         try{p.destinationAccess=access.get();}
         catch(Exception ignored){p.destinationAccess=new DestinationAccessService.Result();}
@@ -175,6 +169,17 @@ public final class RouteCoordinator {
         p.confidence=RouteConfidence.calculate(context,p,destination);
         p.arrival=ArrivalEngine.evaluate(context,destination,route,p.analysis,p.destinationAccess);
         return p;
+    }
+
+    private static void hydrateDrivingDataAsync(OnlineServices.RouteResult route){
+        SCAN_POOL.submit(() -> {
+            try{route.officialSpeeds=OfficialSpeedService.loadForRoute(route.points);}
+            catch(Exception ignored){route.officialSpeeds=new ArrayList<>();}
+        });
+        SCAN_POOL.submit(() -> {
+            try{route.temporarySpeeds=TemporarySpeedService.limitsForRoute(route.points);}
+            catch(Exception ignored){route.temporarySpeeds=new ArrayList<>();}
+        });
     }
 
     private static <T> CompletableFuture<T> async(Callable<T> task){
