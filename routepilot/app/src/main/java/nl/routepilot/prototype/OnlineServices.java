@@ -259,9 +259,9 @@ public final class OnlineServices {
         if (!critical && !close) return;
 
         String description = critical
-                ? String.format(Locale.NL, "%s-limiet %s %s is te laag voor het voertuigprofiel.",
+                ? String.format(new Locale("nl", "NL"), "%s-limiet %s %s is te laag voor het voertuigprofiel.",
                 type.toLowerCase(Locale.ROOT), raw, unit)
-                : String.format(Locale.NL, "%s-limiet %s %s ligt dicht bij het voertuigprofiel.",
+                : String.format(new Locale("nl", "NL"), "%s-limiet %s %s ligt dicht bij het voertuigprofiel.",
                 type.toLowerCase(Locale.ROOT), raw, unit);
 
         out.add(new Restriction(lat, lon, type, raw, description, critical));
