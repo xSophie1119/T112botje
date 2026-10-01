@@ -11,11 +11,11 @@
 
     <application
         android:allowBackup="true"
-        android:label="RoutePilot V3.1 Debug"
+        android:label="RoutePilot V3.2 Debug"
         android:icon="@drawable/ic_routepilot"
         android:theme="@style/Theme.RoutePilot"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="${cleartextTrafficEnabled}">
 
         <meta-data
             android:name="com.google.android.gms.car.application"
