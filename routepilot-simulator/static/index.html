@@ -42,7 +42,17 @@
           </label>
         </div>
         <button id="simulateBtn" class="primary wide">▶ Simuleer WMO-ritten</button>
-        <div id="simStatus" class="hint">OSRM-routes worden gecachet. Herhalen wordt daardoor veel sneller.</div>
+        <div id="batchProgressWrap" class="batch-progress hidden">
+          <div class="batch-progress-head">
+            <strong id="batchStage">Wachten</strong>
+            <span id="batchPct">0%</span>
+          </div>
+          <div class="batch-progress-track"><div id="batchProgressBar"></div></div>
+          <div id="batchCounts" class="batch-counts">0 geldig • 0 afgekeurd</div>
+        </div>
+        <div id="simStatus" class="hint">PDOK/BAG-bestemmingen en OSRM-routes worden lokaal gecachet.</div>
+        <button id="sourceCheckBtn" class="ghost wide source-check">🩺 Controleer databronnen</button>
+        <div id="sourceStatus" class="source-status hidden"></div>
       </section>
 
       <section class="stats-grid">
