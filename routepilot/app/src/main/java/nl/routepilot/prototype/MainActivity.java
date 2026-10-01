@@ -1186,6 +1186,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (phase == WmoSessionManager.Phase.TO_PICKUP
                 || phase == WmoSessionManager.Phase.IDLE) {
             WmoSessionManager.arrivePickup(this);
+            promptPendingLearningIfNeeded();
             waitMinuteAnnounced = false;
             waitExpiredAnnounced = false;
             updateWmoPanel();
@@ -1205,6 +1206,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (phase == WmoSessionManager.Phase.TO_DROPOFF
                 || phase == WmoSessionManager.Phase.PASSENGER_ONBOARD) {
             WmoSessionManager.arriveDropoff(this);
+            promptPendingLearningIfNeeded();
             updateWmoPanel();
             searchArea.setVisibility(View.GONE);
             savedPlaces.setVisibility(View.GONE);
@@ -1294,15 +1296,45 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         RoutePilotStore.LocationProfile existing =
                 RoutePilotStore.findProfile(this, currentDestination.lat, currentDestination.lon);
 
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+
         EditText note = new EditText(this);
-        note.setHint("Bijv. ingang aan rechterzijde, achterom, liftplek...");
+        note.setHint("Bijv. hoofdingang, achterom, liftplek, bel bij receptie...");
         if (existing != null) note.setText(existing.note);
+        form.addView(note);
+
+        CheckBox entranceAtDestination = new CheckBox(this);
+        entranceAtDestination.setText("Bestemmingspunt opslaan als ingang");
+        entranceAtDestination.setChecked(existing == null || !existing.hasEntrancePoint);
+        form.addView(entranceAtDestination);
+
+        CheckBox stopHere = new CheckBox(this);
+        stopHere.setText("Huidige GPS-plek opslaan als WMO-stoppunt");
+        stopHere.setChecked(false);
+        stopHere.setEnabled(currentLocation != null);
+        form.addView(stopHere);
+
+        CheckBox liftOk = new CheckBox(this);
+        liftOk.setText("Achterliftruimte hier geschikt");
+        liftOk.setChecked(existing != null && existing.liftSpaceStatus >= 2);
+        form.addView(liftOk);
+
+        CheckBox departureOk = new CheckBox(this);
+        departureOk.setText("Vertrek/keerruimte hier geschikt");
+        departureOk.setChecked(existing != null && existing.departureStatus >= 2);
+        form.addView(departureOk);
+
+        String currentInfo = existing == null ? "Nieuwe locatie"
+                : existing.visits + " bezoek(en) • "
+                + existing.successfulArrivals + " succesvolle aankomst(en)";
 
         new AlertDialog.Builder(this)
-                .setTitle("Locatieprofiel")
-                .setMessage("Rechterdeur naar de woning-/ingangzijde staat vast aan. "
-                        + "De huidige aanrijrichting wordt als voorkeur opgeslagen.")
-                .setView(note)
+                .setTitle("WMO-locatieprofiel")
+                .setMessage(currentInfo
+                        + "\nDeurzijde blijft altijd een voorkeur; verkeersregels en bereikbaarheid gaan voor.")
+                .setView(form)
                 .setPositiveButton("Opslaan", (d, w) -> {
                     RoutePilotStore.LocationProfile p = existing == null
                             ? new RoutePilotStore.LocationProfile() : existing;
@@ -1312,10 +1344,65 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                     p.lon = currentDestination.lon;
                     p.preferredArrivalBearing = currentAnalysis.approachBearing;
                     p.rightDoorToEntrance = true;
+
+                    if (entranceAtDestination.isChecked()) {
+                        p.hasEntrancePoint = true;
+                        p.entranceLat = currentDestination.lat;
+                        p.entranceLon = currentDestination.lon;
+                    }
+                    if (stopHere.isChecked() && currentLocation != null) {
+                        p.hasStopPoint = true;
+                        p.stopLat = currentLocation.getLatitude();
+                        p.stopLon = currentLocation.getLongitude();
+                    }
+                    p.liftSpaceStatus = liftOk.isChecked() ? 2
+                            : (p.liftSpaceStatus == 2 ? 0 : p.liftSpaceStatus);
+                    p.departureStatus = departureOk.isChecked() ? 2
+                            : (p.departureStatus == 2 ? 0 : p.departureStatus);
+
                     RoutePilotStore.saveProfile(this, p);
-                    Toast.makeText(this, "Locatieprofiel opgeslagen.", Toast.LENGTH_SHORT).show();
+                    currentArrival = ArrivalEngine.evaluate(this, currentDestination,
+                            currentRoute, currentAnalysis, currentDestinationAccess);
+                    arrivalText.setText(currentArrival.summary());
+                    Toast.makeText(this, "WMO-locatieprofiel opgeslagen.",
+                            Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton("Annuleren", null)
+                .show();
+    }
+
+    private void promptPendingLearningIfNeeded() {
+        RoutePilotStore.LearnedPoint p = RoutePilotStore.firstPendingLearning(this);
+        if (p == null) return;
+
+        String[] reasons = {
+                "Smalle/krappe straat",
+                "Slechte bocht of keermogelijkheid",
+                "Verkeerde ingang/stoppunt",
+                "Meestal druk/onhandig",
+                "Weg niet geschikt voor rolstoelbus",
+                "Niet structureel vermijden"
+        };
+
+        new AlertDialog.Builder(this)
+                .setTitle("RoutePilot zag een patroon")
+                .setMessage("Je bent hier " + p.count
+                        + " keer van de voorgestelde route afgeweken. Alleen met jouw bevestiging leert RoutePilot dit structureel.")
+                .setItems(reasons, (dialog, which) -> {
+                    if (which == reasons.length - 1) {
+                        RoutePilotStore.confirmAvoidance(this, p.lat, p.lon,
+                                "niet structureel vermijden");
+                        // Meteen als verlopen/geen penalty behandelen door reden te markeren;
+                        // confirmed blijft bewust maar de route-engine herkent deze tekst hieronder niet als vermijdreden.
+                        Toast.makeText(this, "Afwijking niet als vermijdreden gebruikt.",
+                                Toast.LENGTH_SHORT).show();
+                    } else {
+                        RoutePilotStore.confirmAvoidance(this, p.lat, p.lon, reasons[which]);
+                        Toast.makeText(this, "Leerreden bevestigd: " + reasons[which],
+                                Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("Later", null)
                 .show();
     }
 
