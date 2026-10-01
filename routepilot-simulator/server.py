@@ -24,7 +24,7 @@ HOST = os.environ.get("ROUTEPILOT_SIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ROUTEPILOT_SIM_PORT", "8765"))
 TOKEN = os.environ.get("ROUTEPILOT_PORTAL_TOKEN", "")
 ROUTER = os.environ.get("ROUTEPILOT_ROUTER_URL", "https://router.project-osrm.org").rstrip("/")
-USER_AGENT = "RoutePilot-Simulator/3.5.0 (+https://github.com/xSophie1119/T112botje)"
+USER_AGENT = "RoutePilot-Simulator/3.5.1 (+https://github.com/xSophie1119/T112botje)"
 
 # Regiovervoer Midden-Brabant: 8 gemeenten vormen het binnengebied.
 INNER_MUNICIPALITIES={
@@ -263,7 +263,7 @@ with db() as con:
     # tabel en blijven behouden.
     con.execute(
         "UPDATE scenarios SET generator_version='legacy' "
-        "WHERE generator_version IS NULL OR generator_version='' OR generator_version<>'3.5.0'"
+        "WHERE generator_version IS NULL OR generator_version='' OR generator_version<>'3.5.1'"
     )
     con.execute(
         "UPDATE batch_runs SET status='failed',stage='Onderbroken',"
@@ -430,6 +430,13 @@ def discover_training_locations(anchor):
         _training_location_cache[key]=list(found)
     return found
 
+def _norm_municipality(value):
+    return (
+        str(value or "").lower()
+        .replace("’","'").replace("‘","'")
+        .replace("gemeente ","").strip()
+    )
+
 def _pdok_geocode(query,label,municipality,zone,category):
     params={
         "q":query,"rows":"8","fq":"type:adres",
@@ -448,7 +455,7 @@ def _pdok_geocode(query,label,municipality,zone,category):
         if not point:
             continue
         mun=str(doc.get("gemeentenaam","") or "")
-        if municipality and mun and mun.lower()!=municipality.lower():
+        if municipality and mun and _norm_municipality(mun)!=_norm_municipality(municipality):
             continue
         best=(doc,point)
         break
@@ -463,25 +470,41 @@ def _pdok_geocode(query,label,municipality,zone,category):
     }
 
 def hospital_locations():
-    cached=_cached_training_locations("__hospitals__","hospital")
-    if len(cached)>=5:
+    # V3.5.1: exact de vijf vaste ziekenhuizen; oude cache met Amphia
+    # Oosterhout wordt bewust niet hergebruikt.
+    cache_area="__hospitals_static_v351__"
+    cached=_cached_training_locations(cache_area,"hospital")
+    if len(cached)>=len(HOSPITAL_SPECS):
         return cached
 
     found=[]
+    failures=[]
     for label,query,municipality,zone in HOSPITAL_SPECS:
         try:
             found.append(_pdok_geocode(
                 query,label,municipality,zone,"hospital"
             ))
-        except Exception:
-            continue
+        except Exception as exc:
+            failures.append(label+": "+str(exc)[:100])
+
     if found:
-        _store_training_locations("__hospitals__",found)
-    if len(found)<3 and cached:
-        found=cached
-    if len(found)<3:
-        raise RuntimeError("Te weinig ziekenhuislocaties beschikbaar.")
+        _store_training_locations(cache_area,found)
+
+    by_name={x["name"].split(" · ",1)[0].lower():x for x in found}
+    for item in cached:
+        base=item["name"].split(" · ",1)[0].lower()
+        if base not in by_name:
+            found.append(item)
+            by_name[base]=item
+
+    if len(found)<5:
+        raise RuntimeError(
+            "Hardcoded ziekenhuispool kon slechts "
+            +str(len(found))+"/5 locaties laden. "
+            +"PDOK-fouten: "+("; ".join(failures[:5]) if failures else "onbekend")
+        )
     return found
+
 
 def _osm_point(element):
     if "lat" in element and "lon" in element:
@@ -970,7 +993,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.5.0",
+            "3.5.1",
             category,
             origin.get("zone",""),destination.get("zone",""),
             origin.get("municipality",""),destination.get("municipality",""),
@@ -990,7 +1013,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.5.0",
+            "3.5.1",
             category,
             origin.get("zone",""),destination.get("zone",""),
             origin.get("municipality",""),destination.get("municipality",""),
@@ -1363,7 +1386,7 @@ def source_status():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.5.0"
+    server_version = "RoutePilotSimulator/3.5.1"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -1397,7 +1420,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.5.0", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.5.1", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/source-status":
             return self.send_json(source_status())
@@ -1472,7 +1495,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = con.execute("SELECT * FROM scenarios ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
                 else:
                     rows = con.execute(
-                        "SELECT * FROM scenarios WHERE generator_version='3.5.0' ORDER BY id DESC LIMIT ?",
+                        "SELECT * FROM scenarios WHERE generator_version='3.5.1' ORDER BY id DESC LIMIT ?",
                         (limit,)
                     ).fetchall()
             out = []
@@ -1485,10 +1508,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stats":
             with db_lock, db() as con:
-                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0'").fetchone()[0]
-                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0' AND status='accepted'").fetchone()[0]
-                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0' AND status='rejected'").fetchone()[0]
-                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0' AND status='error'").fetchone()[0]
+                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1'").fetchone()[0]
+                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1' AND status='accepted'").fetchone()[0]
+                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1' AND status='rejected'").fetchone()[0]
+                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1' AND status='error'").fetchone()[0]
                 corrections = con.execute("SELECT COUNT(*) FROM corrections WHERE active=1").fetchone()[0]
                 driver_trips = con.execute("SELECT COUNT(*) FROM driver_trips").fetchone()[0]
             return self.send_json({
@@ -1653,7 +1676,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.5.0 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.5.1 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
