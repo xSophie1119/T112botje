@@ -107,3 +107,8 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 Open daarna in RoutePilot **⚙ Voertuigprofiel → Simulator / Correctieportaal**, vul beide waarden in en tik op **Sync portalcorrecties**.
 
+
+
+## Trainingspunten en snelwegen
+
+Vanaf simulator **3.3.1** worden trainingsankers eerst naar een geschikte lokale autoweg gesnapt. Snelwegen, snelwegopritten en trunk/trunk-link-wegen zijn uitgesloten als start- of eindpunt. Daarna gebruikt OSRM een kleine snapradius, zodat een wijk- of zorganker niet alsnog naar een verderop gelegen snelweg kan springen.
