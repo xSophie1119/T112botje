@@ -392,7 +392,8 @@ public final class OnlineServices {
         return "de juiste richting aan";
     }
 
-    public static List<Restriction> scanRestrictions(RouteResult route,
+    public static List<Restriction> scanRestrictions(android.content.Context context,
+                                                     RouteResult route,
                                                      VehicleProfile vehicle) throws Exception {
         List<Restriction> out = new ArrayList<>();
         if (route == null || route.points.size() < 2) return out;
@@ -474,8 +475,8 @@ public final class OnlineServices {
 
             if (hasBusLaneSignal(tags)) {
                 String busLaneDetail = busLaneDetail(tags);
-                boolean exemptionHere = RoutingRules.busLaneExemptionAllowed(
-                        vehicle.busLaneExemption, MunicipalityService.isInTilburg(lat, lon));
+                boolean exemptionHere = WmoAccessPolicy.busLaneAllowed(
+                        context, vehicle, lat, lon);
                 if (exemptionHere) {
                     addUnique(out, seen, new Restriction(
                             lat, lon, "BUSBAAN", busLaneDetail,
@@ -484,9 +485,8 @@ public final class OnlineServices {
                             false, true
                     ));
                 } else {
-                    String why = vehicle.busLaneExemption
-                            ? "De ontheffing geldt buiten gemeente Tilburg niet."
-                            : "Er staat geen busbaanontheffing aan.";
+                    String why = WmoAccessPolicy.busLaneReason(
+                            context, vehicle, lat, lon);
                     addUnique(out, seen, new Restriction(
                             lat, lon, "BUSBAAN", busLaneDetail,
                             "Busbaan/bus-/PSV-rijstrook gevonden (" + busLaneDetail + "). " + why,
@@ -510,6 +510,11 @@ public final class OnlineServices {
                     new TimedRestrictions(System.currentTimeMillis(), out));
         }
         return new ArrayList<>(out);
+    }
+
+    public static List<Restriction> scanRestrictions(RouteResult route,
+                                                     VehicleProfile vehicle) throws Exception {
+        return scanRestrictions(null, route, vehicle);
     }
 
     private static String restrictionCacheKey(RouteResult route, VehicleProfile vehicle) {
