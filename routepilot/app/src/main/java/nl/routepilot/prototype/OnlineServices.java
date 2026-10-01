@@ -332,6 +332,8 @@ public final class OnlineServices {
                 + "way[\"motor_vehicle\"=\"no\"][\"psv\"~\"yes|designated|permissive\"](around:70," + line + ");"
                 + "way[\"vehicle\"=\"no\"][\"bus\"~\"yes|designated|permissive\"](around:70," + line + ");"
                 + "way[\"vehicle\"=\"no\"][\"psv\"~\"yes|designated|permissive\"](around:70," + line + ");"
+                + "way[\"width\"](around:35," + line + ");"
+                + "way[\"highway\"~\"living_street|service|track\"](around:24," + line + ");"
                 + ");out center tags;";
 
         JSONObject root = new JSONObject(postForm(
