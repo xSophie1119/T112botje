@@ -408,10 +408,13 @@ public final class OnlineServices {
         String line = buildOverpassLine(route.points);
         if (line.isEmpty()) return out;
 
-        String q = "[out:json][timeout:20];("
-                + "nwr[\"maxheight\"](around:70," + line + ");"
+        String physicalQueries = route.providerVehicleAware ? "" :
+                "nwr[\"maxheight\"](around:70," + line + ");"
                 + "nwr[\"maxwidth\"](around:70," + line + ");"
-                + "nwr[\"maxweight\"](around:70," + line + ");"
+                + "nwr[\"maxweight\"](around:70," + line + ");";
+
+        String q = "[out:json][timeout:14];("
+                + physicalQueries
                 + "nwr[\"barrier\"=\"bus_trap\"](around:75," + line + ");"
                 + "way[\"highway\"=\"busway\"](around:70," + line + ");"
                 + "way[\"highway\"=\"bus_guideway\"](around:70," + line + ");"
