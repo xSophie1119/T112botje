@@ -12,21 +12,29 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
+import android.speech.tts.TextToSpeech;
 import android.os.IBinder;
 import android.os.Handler;
 import android.os.Looper;
 
+import org.osmdroid.util.GeoPoint;
+
+import java.util.List;
 import java.util.Locale;
 
-public class NavigationService extends Service implements LocationListener {
+public class NavigationService extends Service implements LocationListener, TextToSpeech.OnInitListener {
     private static final String CHANNEL="routepilot_navigation";
     private static final int NOTIFICATION_ID=2201;
     private LocationManager lm;
+    private TextToSpeech tts;
     private final Handler handler=new Handler(Looper.getMainLooper());
+    private long lastBackgroundRerouteMs=0L;
+    private int backgroundStepIndex=0;
 
     @Override public void onCreate(){
         super.onCreate();
         createChannel();
+        tts=new TextToSpeech(this,this);
         startForeground(NOTIFICATION_ID, buildNotification(RoutePilotState.get(this)));
         lm=(LocationManager)getSystemService(LOCATION_SERVICE);
         startGps();
@@ -52,11 +60,118 @@ public class NavigationService extends Service implements LocationListener {
         RoutePilotState.updatePosition(this,location.getLatitude(),location.getLongitude());
         RoutePilotStore.appendTrack(this,location.getLatitude(),location.getLongitude(),
                 location.hasSpeed()?location.getSpeed():0f);
+
         RoutePilotState.Snapshot s=RoutePilotState.get(this);
+        if(!RoutePilotState.isActivityForeground(this) && s.active){
+            updateBackgroundNavigation(location,s);
+            s=RoutePilotState.get(this);
+        }
+
         NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         if(nm!=null) nm.notify(NOTIFICATION_ID,buildNotification(s));
         WmoSessionManager.Snapshot wmo=WmoSessionManager.get(this);
         if(!s.active && wmo.phase!=WmoSessionManager.Phase.WAITING_PICKUP) stopSelf();
+    }
+
+    private void updateBackgroundNavigation(Location location, RoutePilotState.Snapshot s){
+        List<GeoPoint> route=RoutePilotState.loadRoute(this);
+        if(route.size()<2)return;
+
+        int routeIndex=OnlineServices.closestRoutePointIndex(
+                location.getLatitude(),location.getLongitude(),route);
+        double remaining=OnlineServices.remainingRouteDistanceMeters(Math.max(0,routeIndex),route);
+        double offRoute=OnlineServices.distanceFromRouteMeters(
+                location.getLatitude(),location.getLongitude(),route);
+
+        double remainingSeconds=s.planDistanceM>1.0
+                ? s.planDurationS*(remaining/s.planDistanceM):0.0;
+        long eta=System.currentTimeMillis()+(long)(remainingSeconds*1000.0);
+
+        List<OnlineServices.NavStep> steps=RoutePilotState.loadSteps(this);
+        String instruction=s.instruction==null||s.instruction.isEmpty()?"Volg de route":s.instruction;
+        double stepDistance=0.0;
+        if(!steps.isEmpty()){
+            backgroundStepIndex=Math.max(0,Math.min(backgroundStepIndex,steps.size()-1));
+            OnlineServices.NavStep step=steps.get(backgroundStepIndex);
+            double d=OnlineServices.distanceMeters(
+                    location.getLatitude(),location.getLongitude(),step.lat,step.lon);
+            while(d<32.0 && backgroundStepIndex<steps.size()-1){
+                backgroundStepIndex++;
+                step=steps.get(backgroundStepIndex);
+                d=OnlineServices.distanceMeters(
+                        location.getLatitude(),location.getLongitude(),step.lat,step.lon);
+            }
+            instruction=step.instruction;
+            stepDistance=d;
+        }
+
+        RoutePilotState.update(this,true,instruction,s.warning,
+                stepDistance,remaining,eta,s.speedLimit,s.safetyScore,s.destination);
+
+        if(s.destLat!=0.0 || s.destLon!=0.0){
+            double toDestination=OnlineServices.distanceMeters(
+                    location.getLatitude(),location.getLongitude(),s.destLat,s.destLon);
+            if(toDestination<35.0){
+                handleBackgroundArrival();
+                return;
+            }
+        }
+
+        if(offRoute>120.0
+                && System.currentTimeMillis()-lastBackgroundRerouteMs>25_000L){
+            lastBackgroundRerouteMs=System.currentTimeMillis();
+            RoutePilotStore.markReroute(this);
+            rerouteInBackground(location,s);
+        }
+    }
+
+    private void rerouteInBackground(Location location, RoutePilotState.Snapshot s){
+        if(s.destLat==0.0 && s.destLon==0.0)return;
+        new Thread(() -> {
+            try{
+                OnlineServices.SearchResult destination=new OnlineServices.SearchResult(
+                        s.destLat,s.destLon,s.destination);
+                RouteCoordinator.Prepared p=RouteCoordinator.prepare(
+                        NavigationService.this,location,destination,
+                        VehicleProfile.load(NavigationService.this));
+                RoutePilotState.saveRoute(NavigationService.this,p.route);
+                RoutePilotState.savePlan(NavigationService.this,p.route,destination);
+                RoutePilotStore.savePlannedRoute(NavigationService.this,p.route.points);
+                backgroundStepIndex=0;
+                RoutePilotState.update(NavigationService.this,true,
+                        "Nieuwe route geladen","",
+                        0,p.route.distanceMeters,
+                        System.currentTimeMillis()+(long)(p.route.durationSeconds*1000.0),
+                        -1,p.analysis.score,s.destination);
+                RoutePilotState.updateContext(NavigationService.this,
+                        "Achtergrondroute opnieuw berekend",
+                        p.arrival==null?"":p.arrival.summary(),
+                        p.confidence==null?"":p.confidence.summary());
+                speak("Je bent van de route afgeweken. Nieuwe RoutePilot route geladen.");
+            }catch(Exception ignored){}
+        }).start();
+    }
+
+    private void handleBackgroundArrival(){
+        WmoSessionManager.Snapshot wmo=WmoSessionManager.get(this);
+        if(wmo.phase==WmoSessionManager.Phase.TO_PICKUP
+                || wmo.phase==WmoSessionManager.Phase.IDLE){
+            WmoSessionManager.arrivePickup(this);
+            RoutePilotState.update(this,false,"Aangekomen bij cliënt","",
+                    0,0,0,-1,0,"");
+            speak("Aangekomen bij de cliënt. De wachttijd van drie minuten is gestart.");
+        }else if(wmo.phase==WmoSessionManager.Phase.TO_DROPOFF
+                || wmo.phase==WmoSessionManager.Phase.PASSENGER_ONBOARD){
+            WmoSessionManager.arriveDropoff(this);
+            RoutePilotState.update(this,false,"Brengbestemming bereikt","",
+                    0,0,0,-1,0,"");
+            speak("Brengbestemming bereikt.");
+        }
+    }
+
+    private void speak(String text){
+        if(tts!=null && text!=null && !text.trim().isEmpty())
+            tts.speak(text,TextToSpeech.QUEUE_FLUSH,null,"routepilot-v3-service");
     }
 
     private Notification buildNotification(RoutePilotState.Snapshot s){
@@ -116,9 +231,17 @@ public class NavigationService extends Service implements LocationListener {
         }
     };
 
+    @Override public void onInit(int status){
+        if(status==TextToSpeech.SUCCESS && tts!=null){
+            tts.setLanguage(new Locale("nl","NL"));
+            tts.setSpeechRate(0.96f);
+        }
+    }
+
     @Override public void onDestroy(){
         handler.removeCallbacks(notificationTicker);
         try{if(lm!=null)lm.removeUpdates(this);}catch(Exception ignored){}
+        if(tts!=null){tts.stop();tts.shutdown();}
         super.onDestroy();
     }
 
