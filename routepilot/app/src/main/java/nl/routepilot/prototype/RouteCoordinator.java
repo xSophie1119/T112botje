@@ -75,6 +75,7 @@ public final class RouteCoordinator {
         }
 
         if(!selected.analysis.destinationOnRight
+                && !selected.analysis.doorPreferenceSuppressed
                 && selected.route.liveClosureCount()==0
                 && selected.route.criticalCount()==0
                 && (selected.destinationAccess==null
@@ -213,6 +214,8 @@ public final class RouteCoordinator {
                 boolean bDoorEligible=b.destinationAccess==null
                         || !b.destinationAccess.shouldSkipDoorPreference();
                 if(aDoorEligible && bDoorEligible
+                        && !a.analysis.doorPreferenceSuppressed
+                        && !b.analysis.doorPreferenceSuppressed
                         && a.analysis.destinationOnRight!=b.analysis.destinationOnRight)
                     return a.analysis.destinationOnRight?-1:1;
 
@@ -315,7 +318,7 @@ public final class RouteCoordinator {
 
     private static boolean isPracticalDoorApproach(Prepared base, Prepared candidate){
         if(base==null||candidate==null) return false;
-        if(!candidate.analysis.destinationOnRight) return false;
+        if(!candidate.analysis.destinationOnRight || candidate.analysis.doorPreferenceSuppressed) return false;
         if(candidate.destinationAccess!=null
                 && candidate.destinationAccess.shouldSkipDoorPreference()) return false;
 
