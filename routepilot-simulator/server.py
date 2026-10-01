@@ -24,7 +24,7 @@ HOST = os.environ.get("ROUTEPILOT_SIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ROUTEPILOT_SIM_PORT", "8765"))
 TOKEN = os.environ.get("ROUTEPILOT_PORTAL_TOKEN", "")
 ROUTER = os.environ.get("ROUTEPILOT_ROUTER_URL", "https://router.project-osrm.org").rstrip("/")
-USER_AGENT = "RoutePilot-Simulator/3.5.2 (+https://github.com/xSophie1119/T112botje)"
+USER_AGENT = "RoutePilot-Simulator/3.6.0 (+https://github.com/xSophie1119/T112botje)"
 
 # Regiovervoer Midden-Brabant: 8 gemeenten vormen het binnengebied.
 INNER_MUNICIPALITIES={
@@ -819,6 +819,56 @@ def route_score(route, corrections):
     return score, hits
 
 
+def osrm_route_through(points):
+    """Previewroute door 2..10 [lat,lon]-punten, bedoeld voor de drag-editor."""
+    if not isinstance(points,list) or len(points)<2 or len(points)>10:
+        raise ValueError("Route-editor verwacht 2 t/m 10 punten.")
+
+    clean=[]
+    for p in points:
+        if not isinstance(p,(list,tuple)) or len(p)<2:
+            raise ValueError("Ongeldig routepunt.")
+        lat=float(p[0]);lon=float(p[1])
+        if not (-90<=lat<=90 and -180<=lon<=180):
+            raise ValueError("Ongeldige routecoördinaat.")
+        clean.append((lat,lon))
+
+    coords=";".join(f"{lon:.6f},{lat:.6f}" for lat,lon in clean)
+    # Eindpunten redelijk strak; versleepte via-punten mogen iets ruimer naar
+    # een echte rijbaan worden gesnapt.
+    radii=[]
+    for i in range(len(clean)):
+        radii.append("55" if i in (0,len(clean)-1) else "120")
+
+    url=(
+        f"{ROUTER}/route/v1/driving/{coords}"
+        "?overview=full&geometries=geojson&steps=false&alternatives=false"
+        "&continue_straight=true&radiuses="+urllib.parse.quote(";".join(radii),safe=";")
+    )
+    req=urllib.request.Request(
+        url,headers={"User-Agent":USER_AGENT,"Accept":"application/json"}
+    )
+    last_error=None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req,timeout=12) as resp:
+                data=json.loads(resp.read().decode("utf-8"))
+            if data.get("code")=="Ok" and data.get("routes"):
+                route=data["routes"][0]
+                return {
+                    "geometry":route.get("geometry",{}).get("coordinates",[]),
+                    "distance_m":float(route.get("distance",0) or 0),
+                    "duration_s":float(route.get("duration",0) or 0),
+                    "waypoints":data.get("waypoints") or [],
+                }
+            last_error=RuntimeError(data.get("message") or "Geen editorroute")
+        except Exception as exc:
+            last_error=exc
+        if attempt<2:
+            time.sleep(0.45*(attempt+1))
+    raise RuntimeError("Route-editor kon geen route maken: "+str(last_error or "onbekend"))
+
+
 def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
     key_raw = f"async-pdok-v4:{o_lat:.5f},{o_lon:.5f}>{d_lat:.5f},{d_lon:.5f}"
     cache_key = hashlib.sha256(key_raw.encode()).hexdigest()
@@ -1410,7 +1460,7 @@ def source_status():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.5.2"
+    server_version = "RoutePilotSimulator/3.6.0"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -1444,7 +1494,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.5.2", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.6.0", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/source-status":
             return self.send_json(source_status())
@@ -1606,6 +1656,59 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return self.send_json({"ok": True, "trip_id": trip_id}, 201)
 
+        if path == "/api/route-edit/preview":
+            points=payload.get("points") or []
+            try:
+                result=osrm_route_through(points)
+            except Exception as exc:
+                return self.send_json({"error":str(exc)},400)
+            return self.send_json({"ok":True,**result})
+
+        if path == "/api/route-edit/save":
+            points=payload.get("moved_via") or []
+            endpoint=payload.get("endpoint")
+            scenario_id=int(payload.get("scenario_id",0) or 0)
+            created=[]
+            if not isinstance(points,list):
+                return self.send_json({"error":"moved_via moet een lijst zijn"},400)
+            if len(points)>8:
+                return self.send_json({"error":"maximaal 8 routepunten per bewerking"},400)
+
+            with db_lock,db() as con:
+                for idx,p in enumerate(points):
+                    try:
+                        lat=float(p["lat"]);lon=float(p["lon"])
+                    except Exception:
+                        return self.send_json({"error":"ongeldig versleept routepunt"},400)
+                    note=(
+                        f"Route-editor scenario #{scenario_id}: voorkeursroutepunt {idx+1}. "
+                        "Handmatig versleept door chauffeur."
+                    )
+                    cur=con.execute(
+                        "INSERT INTO corrections(type,lat,lon,radius_m,strength,note,active,created_at) "
+                        "VALUES('prefer',?,?,70,5,?,1,?)",
+                        (lat,lon,note,now_ms())
+                    )
+                    created.append({"id":cur.lastrowid,"type":"prefer","lat":lat,"lon":lon})
+
+                if endpoint:
+                    try:
+                        lat=float(endpoint["lat"]);lon=float(endpoint["lon"])
+                    except Exception:
+                        return self.send_json({"error":"ongeldig versleept eindpunt"},400)
+                    note=(
+                        f"Route-editor scenario #{scenario_id}: gecorrigeerd WMO-stoppunt. "
+                        "Handmatig versleept door chauffeur."
+                    )
+                    cur=con.execute(
+                        "INSERT INTO corrections(type,lat,lon,radius_m,strength,note,active,created_at) "
+                        "VALUES('good_stop',?,?,35,5,?,1,?)",
+                        (lat,lon,note,now_ms())
+                    )
+                    created.append({"id":cur.lastrowid,"type":"good_stop","lat":lat,"lon":lon})
+
+            return self.send_json({"ok":True,"created":created},201)
+
         if path == "/api/simulate":
             try:
                 count=max(1,min(200,int(payload.get("count",25))))
@@ -1700,7 +1803,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.5.2 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.6.0 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
