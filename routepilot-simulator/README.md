@@ -81,3 +81,29 @@ De debugbuild staat lokale HTTP toe zodat een laptop op hetzelfde netwerk bereik
 - `lift_ok` / `lift_bad`: voedt de aankomst-/liftassistent.
 - `turning_ok`: bevestigt keer-/vertrekruimte.
 - busbaancorrecties beïnvloeden de voorkeur, maar officiële verkeersregels en fysieke bebording blijven leidend.
+
+## Makkelijk synchroniseren via Windows LAN
+
+Gebruik **`START_SIMULATOR_LAN.bat`** als je de Android-app met het correctieportaal wilt synchroniseren.
+
+De starter:
+
+- bindt de simulator automatisch aan `0.0.0.0:8765`;
+- zoekt het lokale IPv4-adres van de actieve netwerkadapter;
+- maakt bij de eerste start automatisch een sterk portal-token;
+- bewaart dat token in `portal-token.txt`, zodat je het niet iedere keer opnieuw in de app hoeft te wijzigen;
+- toont exact de **Portal URL** en het **Portal token** die je in RoutePilot moet invullen;
+- opent het webportaal automatisch op de computer.
+
+Voorbeeld:
+
+```text
+Portal URL:
+http://192.168.1.20:8765
+
+Portal token:
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Open daarna in RoutePilot **⚙ Voertuigprofiel → Simulator / Correctieportaal**, vul beide waarden in en tik op **Sync portalcorrecties**.
+
