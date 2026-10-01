@@ -1,4 +1,4 @@
-const state={scenarios:[],corrections:[],driverTrips:[],selected:null,selectedDriver:null,altIndex:0,routeLayer:null,altLayers:[],correctionLayer:null,picked:null,correctionMode:false,showCorrections:true,token:localStorage.getItem('routepilot_token')||''};
+const state={scenarios:[],corrections:[],driverTrips:[],selected:null,selectedDriver:null,altIndex:0,routeLayer:null,altLayers:[],endpointLayers:[],correctionLayer:null,picked:null,correctionMode:false,showCorrections:true,token:localStorage.getItem('routepilot_token')||''};
 const el=id=>document.getElementById(id);
 const map=L.map('map',{zoomControl:true}).setView([51.5555,5.0913],12.5);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
@@ -76,7 +76,11 @@ function openDriverTrip(id){
 function renderScenarios(){
   const f=el('filter').value;
   const list=state.scenarios.filter(x=>f==='all'||x.status===f);
-  el('scenarioList').innerHTML=list.map(x=>'<div class="scenario '+(state.selected&&state.selected.id===x.id?'selected':'')+'" data-id="'+x.id+'"><div class="scenario-top"><span>'+esc(x.origin_name)+' → '+esc(x.destination_name)+'</span><span class="status-dot '+esc(x.status)+'"></span></div><div class="scenario-meta"><span>'+km(x.distance_m)+'</span><span>'+mins(x.duration_s)+'</span><span>'+x.correction_hits+' correcties</span></div>'+(x.error?'<div class="scenario-meta">'+esc(x.error)+'</div>':'')+'</div>').join('')||'<div class="hint">Nog geen simulaties.</div>';
+  el('scenarioList').innerHTML=list.map(x=>{
+    const gap=Number(x.destination_target_to_stop_m||0);
+    const stop=x.destination_stop_name||'route-stop';
+    return '<div class="scenario '+(state.selected&&state.selected.id===x.id?'selected':'')+'" data-id="'+x.id+'"><div class="scenario-top"><span>'+esc(x.origin_name)+' → '+esc(x.destination_name)+'</span><span class="status-dot '+esc(x.status)+'"></span></div><div class="scenario-meta"><span>'+km(x.distance_m)+'</span><span>'+mins(x.duration_s)+'</span><span>'+x.correction_hits+' correcties</span></div>'+(gap?'<div class="scenario-meta"><span>stop: '+esc(stop)+'</span><span>'+Math.round(gap)+' m van doel</span></div>':'')+(x.error?'<div class="scenario-meta">'+esc(x.error)+'</div>':'')+'</div>';
+  }).join('')||'<div class="hint">Nog geen simulaties.</div>';
   document.querySelectorAll('.scenario').forEach(n=>n.onclick=()=>openScenario(Number(n.dataset.id)));
 }
 function renderCorrections(){
