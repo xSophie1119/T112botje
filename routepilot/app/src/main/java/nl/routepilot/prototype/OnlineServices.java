@@ -565,6 +565,26 @@ public final class OnlineServices {
         return sb.toString();
     }
 
+    public static RouteResult routeViaWaypoint(double fromLat, double fromLon,
+                                               double viaLat, double viaLon,
+                                               double toLat, double toLon) throws Exception {
+        String url = String.format(Locale.US,
+                "https://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f;%.6f,%.6f"
+                        + "?overview=full&geometries=geojson&steps=true&alternatives=false&continue_straight=true",
+                fromLon, fromLat, viaLon, viaLat, toLon, toLat);
+        JSONObject root = new JSONObject(get(url, 22000));
+        JSONArray routes = root.optJSONArray("routes");
+        if (routes == null || routes.length() == 0)
+            throw new IllegalArgumentException("Geen route via omleiding beschikbaar.");
+        JSONObject route = routes.getJSONObject(0);
+        return new RouteResult(
+                parseGeometry(route),
+                route.optDouble("distance", 0),
+                route.optDouble("duration", 0),
+                parseSteps(route)
+        );
+    }
+
     public static RouteResult reverseApproachCandidate(double fromLat, double fromLon,
                                                        double toLat, double toLon,
                                                        RouteResult reference) throws Exception {
