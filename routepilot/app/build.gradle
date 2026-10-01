@@ -10,8 +10,8 @@ android {
         applicationId "nl.routepilot.prototype"
         minSdk 26
         targetSdk 35
-        versionCode 21
-        versionName "2.0.1"
+        versionCode 30
+        versionName "3.0.0"
     }
 
     buildTypes {
@@ -30,4 +30,5 @@ dependencies {
     implementation 'org.osmdroid:osmdroid-android:6.1.20'
     implementation 'androidx.car.app:app:1.7.0'
     implementation 'androidx.car.app:app-projected:1.7.0'
+    testImplementation 'junit:junit:4.13.2'
 }
