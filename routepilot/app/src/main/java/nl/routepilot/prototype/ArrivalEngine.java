@@ -48,8 +48,20 @@ public final class ArrivalEngine {
         RoutePilotStore.LocationProfile profile =
                 RoutePilotStore.findProfile(context, destination.lat, destination.lon);
         VehicleProfile vehicle = VehicleProfile.load(context);
+        PortalCorrectionStore.Correction portalStop =
+                PortalCorrectionStore.nearestOfType(context,"good_stop",destination.lat,destination.lon);
+        PortalCorrectionStore.Correction portalLiftOk =
+                PortalCorrectionStore.nearestOfType(context,"lift_ok",destination.lat,destination.lon);
+        PortalCorrectionStore.Correction portalLiftBad =
+                PortalCorrectionStore.nearestOfType(context,"lift_bad",destination.lat,destination.lon);
+        PortalCorrectionStore.Correction portalTurn =
+                PortalCorrectionStore.nearestOfType(context,"turning_ok",destination.lat,destination.lon);
 
-        if (profile != null && profile.hasStopPoint) {
+        if (portalStop != null) {
+            out.recommendedStop = new GeoPoint(portalStop.lat, portalStop.lon);
+            out.stopMessage = "WMO-stoppunt uit correctieportaal gebruikt."
+                    + (portalStop.note==null||portalStop.note.isEmpty()?"":" "+portalStop.note);
+        } else if (profile != null && profile.hasStopPoint) {
             out.recommendedStop = new GeoPoint(profile.stopLat, profile.stopLon);
             out.stopMessage = "Opgeslagen WMO-stoppunt gebruikt.";
         } else if (access != null && access.fallbackStop != null) {
@@ -61,8 +73,12 @@ public final class ArrivalEngine {
             out.stopMessage = "Stoppunt rond bestemming; controleer de exacte veilige stoppositie.";
         }
 
-        boolean forcedSkip = access != null && access.shouldSkipDoorPreference();
-        if (forcedSkip) {
+        boolean forcedSkip = (analysis != null && analysis.doorPreferenceSuppressed)
+                || (access != null && access.shouldSkipDoorPreference());
+        if (analysis != null && analysis.doorPreferenceSuppressed) {
+            out.rightDoorSkipped = true;
+            out.sideMessage = "Rechterdeurvoorkeur hier bewust uitgeschakeld via correctieportaal.";
+        } else if (forcedSkip) {
             out.rightDoorSkipped = true;
             out.sideMessage = "Rechterdeurvoorkeur losgelaten door bereikbaarheid/eenrichtings-/keerbaarheidslogica.";
         } else if (analysis != null && analysis.destinationOnRight) {
@@ -73,7 +89,14 @@ public final class ArrivalEngine {
             out.sideMessage = "Normale legale aanrijrichting blijft leidend; deurzijde is alleen voorkeur.";
         }
 
-        if (profile != null && profile.liftSpaceStatus > 0) {
+        if (portalLiftOk != null) {
+            out.liftMessage = "Achterliftruimte via correctieportaal als geschikt bevestigd.";
+        } else if (portalLiftBad != null) {
+            out.liftMessage = "Achterliftruimte via correctieportaal als ongeschikt/aandachtspunt gemarkeerd.";
+            out.warnings.add(portalLiftBad.note==null||portalLiftBad.note.isEmpty()
+                    ?"Kies indien mogelijk een ander stoppunt voor de achterlift."
+                    :portalLiftBad.note);
+        } else if (profile != null && profile.liftSpaceStatus > 0) {
             if (profile.liftSpaceStatus >= 2) {
                 out.liftMessage = "Achterliftruimte eerder als geschikt bevestigd.";
             } else {
@@ -88,7 +111,9 @@ public final class ArrivalEngine {
                     + " vrije ruimte achter de bus.";
         }
 
-        if (access != null) {
+        if (portalTurn != null) {
+            out.departureMessage = "Keer-/vertrekruimte via correctieportaal als geschikt bevestigd.";
+        } else if (access != null) {
             if (access.deadEndSignal && access.turningOptions == 0) {
                 out.departureMessage = "Geen betrouwbare keeroptie gevonden; vertrekbaarheid is aandachtspunt.";
                 out.warnings.add("Overweeg vóór de laatste straat te stoppen als keren/achteruitrijden onveilig lijkt.");
