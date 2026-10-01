@@ -235,6 +235,7 @@ public final class RoutePilotStore {
         long now=System.currentTimeMillis();
         for(LearnedPoint p:learned(c)){
             if(!p.confirmed) continue;
+            if(p.reason!=null && p.reason.toLowerCase().contains("niet structureel vermijden")) continue;
             if(p.lastSeenAt>0 && now-p.lastSeenAt>180L*24L*60L*60L*1000L) continue;
             double min=Double.MAX_VALUE;
             int stride=Math.max(1,route.size()/600);
