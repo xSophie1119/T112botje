@@ -128,3 +128,18 @@ Per trainingsrit worden apart opgeslagen en weergegeven:
 In de kaartreview is **paars** de echte bestemming en **groen** het werkelijke route-eindpunt. Als de router meer dan 95 meter van de concrete bestemming eindigt, wordt het scenario afgekeurd in plaats van stilzwijgend naar een andere locatie te verschuiven.
 
 Oude scenario's die nog met grove wijkankers zijn gemaakt worden als legacy behandeld en verdwijnen uit de normale trainingslijst. Opgeslagen RoutePilot-correcties blijven behouden.
+
+
+## Route slepen (3.6)
+
+Open een trainingsrit en kies **✥ Route slepen**.
+
+- witte/blauwe punten op de route zijn versleepbaar;
+- het groene eindpunt is versleepbaar naar het gewenste WMO-stoppunt;
+- klik op de route om een extra via-punt toe te voegen;
+- rechtsklik een extra/routepunt om het te verwijderen;
+- tijdens slepen wordt via OSRM direct een nieuwe previewroute berekend;
+- de oorspronkelijke route blijft als referentie zichtbaar;
+- **Correcties opslaan** zet verplaatste routepunten om in sterke `prefer`-correcties en een verplaatst eindpunt in een `good_stop`-correctie.
+
+Daardoor verschijnen de wijzigingen in de normale correctielijst en worden ze via de bestaande portal-sync ook naar RoutePilot Android gestuurd.
