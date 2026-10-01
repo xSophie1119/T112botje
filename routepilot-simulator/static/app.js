@@ -108,6 +108,20 @@ function paintBatch(x){
   el('batchPct').textContent=pct+'%';
   el('batchProgressBar').style.width=pct+'%';
   el('batchCounts').textContent=success+'/'+requested+' geldig • '+errors+' afgekeurd • '+Number(x.completed_count||0)+' pogingen';
+  const mix=x.mix||{},rings=x.rings||{};
+  const mixParts=[
+    '🏥 '+Number(mix.hospital||0),
+    '🏡 zorg '+Number(mix.care||0),
+    '📍 overig '+Number(mix.general||0),
+    'unieke start '+Number(x.unique_origins||0),
+    'unieke eind '+Number(x.unique_destinations||0)
+  ];
+  const ringParts=[
+    'B→B '+Number(rings['inside->inside']||0),
+    'B→U '+Number(rings['inside->outside']||0),
+    'U→B '+Number(rings['outside->inside']||0)
+  ];
+  el('batchMix').textContent=mixParts.join(' • ')+' | '+ringParts.join(' • ');
   el('simStatus').textContent=x.message||'Batch '+x.batch_id+' wordt uitgevoerd…';
 }
 
