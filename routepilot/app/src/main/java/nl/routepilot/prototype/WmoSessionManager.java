@@ -196,7 +196,7 @@ public final class WmoSessionManager {
 
     public static String formatWait(long ms) {
         long sec = Math.max(0L, (ms + 999L) / 1000L);
-        return String.format(Locale.NL, "%d:%02d", sec / 60L, sec % 60L);
+        return String.format(new Locale("nl","NL"), "%d:%02d", sec / 60L, sec % 60L);
     }
 
     public static synchronized List<HistoryItem> history(Context c) {
