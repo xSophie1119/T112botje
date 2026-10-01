@@ -559,19 +559,34 @@ def build_training_pools(rng,count,progress=None):
     seeds=list(AREA_SEEDS)
     rng.shuffle(seeds)
 
-    for idx,anchor in enumerate(seeds):
-        if progress:
-            progress(
-                "Bestemmingen verzamelen",
-                f"Adressen spreiden over regio: {anchor[0]} ({idx+1}/{len(seeds)})"
-            )
+    def fetch_seed(anchor):
         try:
-            items=discover_training_locations(anchor)
-        except Exception:
-            continue
+            return anchor,discover_training_locations(anchor),None
+        except Exception as exc:
+            return anchor,[],str(exc)
 
-        # Pak per gebied een kleine willekeurige steekproef in plaats van
-        # vroeg te stoppen zodra de eerste paar gebieden genoeg adressen geven.
+    # Eerste run: maximaal vier gelijktijdige PDOK-requests. Daarna wordt
+    # vrijwel alles uit de 30-dagen-cache gelezen.
+    workers=max(1,min(4,int(os.environ.get("ROUTEPILOT_LOCATION_WORKERS","4"))))
+    finished=0
+    results=[]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures=[pool.submit(fetch_seed,a) for a in seeds]
+        for future in as_completed(futures):
+            anchor,items,error=future.result()
+            finished+=1
+            if progress:
+                progress(
+                    "Bestemmingen verzamelen",
+                    f"Regio-adressen {finished}/{len(seeds)} • {anchor[0]}"
+                    +(f" • overgeslagen: {error[:60]}" if error else "")
+                )
+            results.append((anchor,items))
+
+    # Verwerk pas na ophalen. Daardoor beïnvloedt netwerkvolgorde niet de
+    # randomisatie/verdeling van een batch.
+    rng.shuffle(results)
+    for anchor,items in results:
         items=list(items)
         rng.shuffle(items)
         for item in items[:8]:
@@ -586,6 +601,8 @@ def build_training_pools(rng,count,progress=None):
             f"Te weinig verspreide adressen gevonden ({len(general)})."
         )
 
+    if progress:
+        progress("Zorglocaties verzamelen","Ziekenhuizen en zorginstellingen voorbereiden…")
     hospitals=hospital_locations()
     care=care_locations()
     rng.shuffle(general);rng.shuffle(hospitals);rng.shuffle(care)
@@ -596,6 +613,7 @@ def build_training_pools(rng,count,progress=None):
         "inside":[x for x in general if x.get("zone")=="inside"],
         "outside":[x for x in general if x.get("zone")=="outside"],
     }
+
 
 def quota_plan(count):
     # Bij 25: exact minimaal 5 ziekenhuis + 5 zorg. Bij andere batchgroottes
