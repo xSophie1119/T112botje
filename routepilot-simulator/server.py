@@ -82,14 +82,33 @@ AREA_SEEDS=[
 ANCHORS=[(name,lat,lon) for name,lat,lon,_municipality,_zone in AREA_SEEDS]
 
 HOSPITAL_SPECS=[
+    # Exact de vijf ziekenhuizen die in de trainer moeten zitten.
     # naam, adresquery, gemeente, zone
     ("ETZ Elisabeth","Hilvarenbeekseweg 60 5022 GC Tilburg","Tilburg","inside"),
     ("ETZ TweeSteden","Dr. Deelenlaan 5 5042 AD Tilburg","Tilburg","inside"),
     ("ETZ Waalwijk","Kasteellaan 2 5141 BM Waalwijk","Waalwijk","inside"),
     ("Amphia Breda","Molengracht 21 4818 CK Breda","Breda","outside"),
-    ("Amphia Oosterhout","Pasteurlaan 9 4901 DH Oosterhout","Oosterhout","outside"),
     ("Jeroen Bosch Ziekenhuis","Henri Dunantstraat 1 5223 GZ 's-Hertogenbosch","'s-Hertogenbosch","outside"),
 ]
+
+CARE_SPECS=[
+    # Hardcoded woon-/zorglocaties in het binnengebied.
+    # naam, adresquery, gemeente, zone
+    ("De Wever Satijnhof","Wethouderslaan 9 5021 AK Tilburg","Tilburg","inside"),
+    ("De Wever Reyshoeve","Gendringenlaan 15 5043 LW Tilburg","Tilburg","inside"),
+    ("Thebe Erasplaats","Erasplaats 114 5046 LA Tilburg","Tilburg","inside"),
+    ("Thebe NAH Mahlerstraat","Mahlerstraat 391 5011 ME Tilburg","Tilburg","inside"),
+    ("Thebe NAH Verdiplein","Verdiplein 73a 5049 NP Tilburg","Tilburg","inside"),
+    ("Thebe Guldenakker","Wittendijk 2 5051 GB Goirle","Goirle","inside"),
+    ("Thebe De Vloet","Vloeiweg 85 5061 GA Oisterwijk","Oisterwijk","inside"),
+    ("Thebe Park Stanislaus","Kloosterdreef 3 5066 AA Moergestel","Oisterwijk","inside"),
+    ("Mijzo Dongepark","Dongepark 1 5102 DB Dongen","Dongen","inside"),
+    ("Mijzo Eekhof","Gasthuisstraat 11 5171 GC Kaatsheuvel","Loon op Zand","inside"),
+    ("Mijzo Eikendonk","Eikendonklaan 2 5143 NG Waalwijk","Waalwijk","inside"),
+    ("Mijzo Koetshuis","Koetshuislaan 701 5146 BR Waalwijk","Waalwijk","inside"),
+    ("Mijzo Spoorwiel","Burgemeester Verwielstraat 2 5141 BD Waalwijk","Waalwijk","inside"),
+]
+
 
 # Steden/plaatsen waarmee OSM-zorginstellingen aan de 8 regiogemeenten
 # gekoppeld kunnen worden.
@@ -484,74 +503,46 @@ def _nearest_inner_municipality(lat,lon):
     return candidates[0] if candidates else (1e9,"","")
 
 def care_locations():
-    cached=_cached_training_locations("__care__","care")
-    if len(cached)>=12:
+    # V3.5.1: géén Overpass-afhankelijkheid meer. De locaties zelf zijn
+    # hardcoded; PDOK wordt alleen gebruikt om het vaste bezoekadres naar
+    # coördinaten om te zetten en daarna wordt het resultaat lokaal gecachet.
+    cache_area="__care_static_v351__"
+    cached=_cached_training_locations(cache_area,"care")
+    if len(cached)>=len(CARE_SPECS):
         return cached
 
-    # Alleen categorie-ontdekking gebruikt Overpass; gewone adressen en
-    # iedere route zelf zijn hier niet meer van afhankelijk.
-    query=(
-        '[out:json][timeout:20];('
-        'nwr["social_facility"~"nursing_home|assisted_living|group_home"](51.43,4.88,51.72,5.25);'
-        'nwr["amenity"="nursing_home"](51.43,4.88,51.72,5.25);'
-        'nwr["healthcare"="nursing_home"](51.43,4.88,51.72,5.25);'
-        ');out center tags;'
-    )
-    payload=urllib.parse.urlencode({"data":query}).encode("utf-8")
-    req=urllib.request.Request(
-        OVERPASS_URL,data=payload,method="POST",
-        headers={
-            "User-Agent":USER_AGENT,
-            "Accept":"application/json",
-            "Content-Type":"application/x-www-form-urlencoded; charset=UTF-8",
-        }
-    )
-
     found=[]
-    try:
-        with urllib.request.urlopen(req,timeout=20) as resp:
-            root=json.loads(resp.read().decode("utf-8"))
-        seen=set()
-        for element in root.get("elements",[]):
-            point=_osm_point(element)
-            tags=element.get("tags") or {}
-            name=str(tags.get("name","") or "").strip()
-            if not point or not name:
-                continue
-            lat,lon=point
-            city=str(tags.get("addr:city","") or "").strip().lower()
-            municipality=PLACE_TO_MUNICIPALITY.get(city,"")
-            if not municipality:
-                dist,municipality,_seed=_nearest_inner_municipality(lat,lon)
-                if dist>9000:
-                    continue
-            if municipality not in INNER_MUNICIPALITIES:
-                continue
-            street=str(tags.get("addr:street","") or "").strip()
-            number=str(tags.get("addr:housenumber","") or "").strip()
-            address=" ".join(x for x in (street,number) if x).strip()
-            label=name+(" · "+address if address else "")
-            key=(name.lower(),round(lat,5),round(lon,5))
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append({
-                "name":label,"lat":lat,"lon":lon,
-                "source":"OpenStreetMap zorg-POI",
-                "area":municipality,"municipality":municipality,
-                "zone":"inside","category":"care",
-            })
-        found=found[:100]
-        if found:
-            _store_training_locations("__care__",found)
-    except Exception:
-        found=list(cached)
+    failures=[]
+    for label,query,municipality,zone in CARE_SPECS:
+        try:
+            found.append(_pdok_geocode(
+                query,label,municipality,zone,"care"
+            ))
+        except Exception as exc:
+            failures.append(label+": "+str(exc)[:100])
+
+    # Bewaar iedere gelukte vaste locatie. Een volgende start kan daardoor
+    # volledig uit lokale cache werken als PDOK tijdelijk niet bereikbaar is.
+    if found:
+        _store_training_locations(cache_area,found)
+
+    # Voeg eventueel eerder gecachte vaste locaties toe die deze run niet
+    # gegeocode konden worden.
+    by_name={x["name"].split(" · ",1)[0].lower():x for x in found}
+    for item in cached:
+        base=item["name"].split(" · ",1)[0].lower()
+        if base not in by_name:
+            found.append(item)
+            by_name[base]=item
 
     if len(found)<5:
-        if len(cached)>=5:
-            return cached
-        raise RuntimeError("Te weinig zorginstellingen gevonden.")
+        raise RuntimeError(
+            "Hardcoded zorgpool kon slechts "
+            +str(len(found))+" locaties laden. "
+            +"PDOK-fouten: "+("; ".join(failures[:5]) if failures else "onbekend")
+        )
     return found
+
 
 def build_training_pools(rng,count,progress=None):
     general=[]
