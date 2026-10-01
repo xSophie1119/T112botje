@@ -35,6 +35,24 @@ public final class HttpClient {
         }
     }
 
+    public static String postJson(String url,String json,int timeoutMs,
+                                  String headerName,String headerValue)throws Exception{
+        OkHttpClient c=CLIENT.newBuilder()
+                .callTimeout(Math.max(1000,timeoutMs),TimeUnit.MILLISECONDS).build();
+        RequestBody body=RequestBody.create(json,MediaType.get("application/json; charset=utf-8"));
+        Request.Builder rb=new Request.Builder().url(url).post(body)
+                .header("User-Agent",OnlineServices.USER_AGENT)
+                .header("Accept","application/json")
+                .header("Accept-Encoding","gzip");
+        if(headerName!=null&&headerValue!=null&&!headerValue.trim().isEmpty())
+            rb.header(headerName,headerValue.trim());
+        try(Response resp=c.newCall(rb.build()).execute()){
+            String text=resp.body()==null?"":resp.body().string();
+            if(!resp.isSuccessful())throw new IllegalStateException("HTTP "+resp.code()+": "+trim(text,240));
+            return text;
+        }
+    }
+
     public static String postJson(String url,String json,int timeoutMs)throws Exception{
         OkHttpClient c=CLIENT.newBuilder()
                 .callTimeout(Math.max(1000,timeoutMs),TimeUnit.MILLISECONDS).build();
