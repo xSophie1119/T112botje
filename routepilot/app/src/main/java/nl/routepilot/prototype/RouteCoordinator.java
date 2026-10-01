@@ -85,6 +85,12 @@ public final class RouteCoordinator {
             applyFormalSignRestrictions(route,vehicle);
         }catch(Exception e){p.signScanOk=false;}
 
+        try{
+            route.officialSpeeds=OfficialSpeedService.loadForRoute(route.points);
+        }catch(Exception ignored){
+            route.officialSpeeds=new ArrayList<>();
+        }
+
         p.analysis=RouteAnalysis.analyze(context,route,destination);
         return p;
     }
