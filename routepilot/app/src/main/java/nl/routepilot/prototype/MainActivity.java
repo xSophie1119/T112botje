@@ -1367,6 +1367,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (wmoState.phase != WmoSessionManager.Phase.WAITING_PICKUP)
             stopService(new Intent(this, NavigationService.class));
         RoutePilotStore.finishTrip(this);
+        PortalTripSyncService.uploadLatestAsync(this);
 
         navArea.setVisibility(View.GONE);
         searchArea.setVisibility(View.VISIBLE);
