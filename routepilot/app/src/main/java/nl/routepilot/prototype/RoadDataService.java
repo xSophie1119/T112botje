@@ -41,6 +41,7 @@ public final class RoadDataService {
         }
 
         public boolean isSpeed() { return rvvCode != null && rvvCode.startsWith("A1"); }
+        public boolean isSpeedEnd() { return rvvCode != null && rvvCode.startsWith("A2"); }
         public Integer speedKmh() {
             try {
                 if (!isSpeed()) return null;
@@ -103,11 +104,18 @@ public final class RoadDataService {
         int best = -1;
         if (signs == null) return null;
         for (Sign s : signs) {
-            if (!s.isSpeed() || s.routeIndex < 0 || s.routeIndex > routeIndex) continue;
-            Integer kmh = s.speedKmh();
-            if (kmh != null && s.routeIndex >= best) {
-                current = kmh;
+            if (s.routeIndex < 0 || s.routeIndex > routeIndex || s.routeIndex < best) continue;
+            if (s.isSpeedEnd()) {
+                current = null;
                 best = s.routeIndex;
+                continue;
+            }
+            if (s.isSpeed()) {
+                Integer kmh = s.speedKmh();
+                if (kmh != null) {
+                    current = kmh;
+                    best = s.routeIndex;
+                }
             }
         }
         return current;
