@@ -271,7 +271,8 @@ public final class RouteCoordinator {
     private static int hardScore(Prepared p){
         if(p==null||p.route==null)return Integer.MAX_VALUE;
         return p.route.liveClosureCount()*100+p.route.criticalCount()*20
-                +p.route.bridgeConflictCount()*12;
+                +p.route.bridgeConflictCount()*12
+                +(p.analysis==null?0:p.analysis.portalHardHits*30);
     }
 
     private static double[] firstHardPoint(Prepared p){
