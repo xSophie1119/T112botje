@@ -39,6 +39,30 @@ public class DashboardActivity extends Activity {
         h.append("<h1>RoutePilot Dashboard</h1><div class='card'><b>")
          .append(esc(RoutePilotStore.summary(this))).append("</b><br><small>Lokaal dashboard • debug</small></div>");
 
+        List<WmoSessionManager.HistoryItem> wmo = WmoSessionManager.history(this);
+        h.append("<div class='card'><h2>WMO-overzicht</h2>")
+         .append("<b>").append(wmo.size()).append(" afgeronde WMO-statussen</b><br>")
+         .append("<small>Gem. wachttijd: ")
+         .append(String.format(NL,"%.0f sec",WmoSessionManager.averageWaitSeconds(this)))
+         .append(" • gem. uitstaptijd: ")
+         .append(String.format(NL,"%.0f sec",WmoSessionManager.averageDropoffSeconds(this)))
+         .append(" • loos/no-show: ").append(WmoSessionManager.noShowCount(this))
+         .append(" • leerpunten te bevestigen: ").append(RoutePilotStore.pendingLearningCount(this))
+         .append("</small></div>");
+
+        h.append("<div class='card'><h2>Recente WMO-ritten</h2><table>");
+        int wshown=0;
+        for(WmoSessionManager.HistoryItem wh:wmo){
+            if(wshown++>=12)break;
+            h.append("<tr><td>").append(wh.startedAt>0?df.format(new Date(wh.startedAt)):"—").append("</td><td>")
+             .append(esc(wh.pickupLabel)).append("</td><td>")
+             .append(esc(wh.dropoffLabel)).append("</td><td>")
+             .append(esc(wh.result)).append("</td><td>")
+             .append(String.format(NL,"%.0f sec wachten",wh.waitMs/1000.0)).append("</td></tr>");
+        }
+        if(wmo.isEmpty())h.append("<tr><td>Nog geen WMO-ritten opgeslagen.</td></tr>");
+        h.append("</table></div>");
+
         h.append("<div class='card'><h2>Ritten & replay-data</h2><table>");
         int shown=0;
         for(RoutePilotStore.Trip t:trips){
@@ -64,7 +88,7 @@ public class DashboardActivity extends Activity {
         h.append("<div class='card'><h2>Geleerde vermijdpunten</h2><table>");
         for(RoutePilotStore.LearnedPoint p:learned){
             h.append("<tr><td>").append(p.count).append("×</td><td>")
-             .append(esc(p.reason)).append("</td><td><small>")
+             .append(p.confirmed?"✓ ":"? ").append(esc(p.reason)).append("</td><td><small>")
              .append(String.format(Locale.US,"%.5f, %.5f",p.lat,p.lon)).append("</small></td></tr>");
         }
         if(learned.isEmpty())h.append("<tr><td>RoutePilot heeft nog niets hoeven leren.</td></tr>");
