@@ -418,6 +418,166 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         navArea.setLayoutParams(navLp);
     }
 
+    private void buildWmoPanel(LinearLayout panel) {
+        wmoArea = new LinearLayout(this);
+        wmoArea.setOrientation(LinearLayout.VERTICAL);
+        wmoArea.setPadding(dp(13), dp(11), dp(13), dp(12));
+        wmoArea.setBackground(rounded(PANEL, 15));
+
+        TextView label = text("WMO TILBURG", 10, BLUE, Typeface.BOLD);
+        wmoArea.addView(label);
+
+        wmoPhaseText = text("WMO gereed", 17, TEXT, Typeface.BOLD);
+        wmoPhaseText.setPadding(0, dp(3), 0, 0);
+        wmoArea.addView(wmoPhaseText);
+
+        waitTimerText = text("", 28, ORANGE, Typeface.BOLD);
+        waitTimerText.setPadding(0, dp(2), 0, dp(4));
+        wmoArea.addView(waitTimerText);
+
+        confidenceText = text("", 11, MUTED, Typeface.NORMAL);
+        confidenceText.setPadding(0, dp(2), 0, 0);
+        wmoArea.addView(confidenceText);
+
+        lookAheadText = text("", 11, MUTED, Typeface.NORMAL);
+        lookAheadText.setPadding(0, dp(4), 0, 0);
+        wmoArea.addView(lookAheadText);
+
+        arrivalText = text("", 11, TEXT, Typeface.NORMAL);
+        arrivalText.setPadding(0, dp(4), 0, 0);
+        wmoArea.addView(arrivalText);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(8), 0, 0);
+
+        boardedButton = smallButton("Cliënt ingestapt");
+        boardedButton.setOnClickListener(v -> markPassengerBoarded());
+        actions.addView(boardedButton, new LinearLayout.LayoutParams(0, dp(46), 1f));
+
+        noShowButton = dangerButton("Loos na 3:00");
+        noShowButton.setEnabled(false);
+        noShowButton.setOnClickListener(v -> markNoShow());
+        LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(0, dp(46), 0.85f);
+        np.leftMargin = dp(7);
+        actions.addView(noShowButton, np);
+
+        tripDoneButton = darkButton("Rit gereed");
+        tripDoneButton.setOnClickListener(v -> completeWmoTrip());
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(46), 0.8f);
+        tp.leftMargin = dp(7);
+        actions.addView(tripDoneButton, tp);
+
+        wmoArea.addView(actions);
+        panel.addView(wmoArea);
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) wmoArea.getLayoutParams();
+        lp.topMargin = dp(9);
+        wmoArea.setLayoutParams(lp);
+    }
+
+    private final Runnable waitTicker = new Runnable() {
+        @Override public void run() {
+            try {
+                WmoSessionManager.Snapshot s = WmoSessionManager.get(MainActivity.this);
+                if (s.phase == WmoSessionManager.Phase.WAITING_PICKUP) {
+                    long left = s.waitRemainingMs();
+                    waitTimerText.setText(left > 0
+                            ? "Wachttijd " + WmoSessionManager.formatWait(left)
+                            : "00:00 • LOOS MOGELIJK");
+                    waitTimerText.setTextColor(left > 60_000L ? ORANGE : RED);
+
+                    if (left <= 60_000L && left > 0 && !waitMinuteAnnounced) {
+                        waitMinuteAnnounced = true;
+                        speak("Nog één minuut wachttijd.");
+                    }
+                    if (left <= 0) {
+                        noShowButton.setEnabled(true);
+                        noShowButton.setText("LOOS / NO-SHOW");
+                        if (!waitExpiredAnnounced) {
+                            waitExpiredAnnounced = true;
+                            speak("Drie minuten wachttijd verstreken. De rit kan nu als loos worden gemeld.");
+                        }
+                    }
+                    RoutePilotState.updateWmo(MainActivity.this,
+                            s.phaseLabel(), left, left <= 0);
+                } else {
+                    waitTimerText.setText("");
+                    waitMinuteAnnounced = false;
+                    waitExpiredAnnounced = false;
+                }
+                updateWmoPanel();
+            } catch (Exception ignored) {}
+            uiHandler.postDelayed(this, 500L);
+        }
+    };
+
+    private void updateWmoPanel() {
+        if (wmoArea == null) return;
+        WmoSessionManager.Snapshot s = WmoSessionManager.get(this);
+        wmoPhaseText.setText(s.phaseLabel());
+
+        boolean waiting = s.phase == WmoSessionManager.Phase.WAITING_PICKUP;
+        boardedButton.setVisibility(waiting ? View.VISIBLE : View.GONE);
+        noShowButton.setVisibility(waiting ? View.VISIBLE : View.GONE);
+        tripDoneButton.setVisibility(s.phase == WmoSessionManager.Phase.DISEMBARKING
+                ? View.VISIBLE : View.GONE);
+
+        if (!waiting) {
+            noShowButton.setEnabled(false);
+            noShowButton.setText("Loos na 3:00");
+        }
+
+        if (s.phase == WmoSessionManager.Phase.PASSENGER_ONBOARD) {
+            arrivalText.setText("Cliënt aan boord • voer nu de brengbestemming in.");
+        } else if (s.phase == WmoSessionManager.Phase.NO_SHOW) {
+            arrivalText.setText("Loos geregistreerd. Klaar voor een nieuwe WMO-rit.");
+        } else if (s.phase == WmoSessionManager.Phase.COMPLETED) {
+            arrivalText.setText("WMO-rit afgerond.");
+        }
+    }
+
+    private void markPassengerBoarded() {
+        WmoSessionManager.Snapshot before = WmoSessionManager.get(this);
+        if (before.phase != WmoSessionManager.Phase.WAITING_PICKUP) return;
+        WmoSessionManager.passengerBoarded(this);
+        waitTimerText.setText("");
+        noShowButton.setEnabled(false);
+        searchArea.setVisibility(View.VISIBLE);
+        savedPlaces.setVisibility(View.VISIBLE);
+        previewArea.setVisibility(View.GONE);
+        destinationInput.setText("");
+        destinationInput.requestFocus();
+        updateWmoPanel();
+        speak("Cliënt ingestapt. Voer de brengbestemming in.");
+        Toast.makeText(this, "Cliënt aan boord • voer bestemming in", Toast.LENGTH_LONG).show();
+    }
+
+    private void markNoShow() {
+        WmoSessionManager.Snapshot s = WmoSessionManager.get(this);
+        if (s.phase != WmoSessionManager.Phase.WAITING_PICKUP || s.waitRemainingMs() > 0) return;
+        WmoSessionManager.noShow(this);
+        if (currentLocation != null) {
+            RoutePilotStore.addReport(this, "LOOS / NO-SHOW", "3 minuten wachttijd verstreken",
+                    currentLocation.getLatitude(), currentLocation.getLongitude());
+        }
+        updateWmoPanel();
+        speak("Loos geregistreerd. Klaar voor een nieuwe rit.");
+        Toast.makeText(this, "Loos/no-show geregistreerd.", Toast.LENGTH_LONG).show();
+    }
+
+    private void completeWmoTrip() {
+        WmoSessionManager.Snapshot s = WmoSessionManager.get(this);
+        if (s.phase != WmoSessionManager.Phase.DISEMBARKING) return;
+        WmoSessionManager.complete(this);
+        if (currentDestination != null && currentAnalysis != null) {
+            RoutePilotStore.markArrivalSuccess(this, currentDestination.lat, currentDestination.lon,
+                    currentAnalysis.approachBearing, false, false);
+        }
+        updateWmoPanel();
+        speak("WMO rit gereed.");
+        Toast.makeText(this, "WMO-rit gereed.", Toast.LENGTH_SHORT).show();
+    }
+
     private void startLocation() {
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
