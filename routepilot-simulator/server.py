@@ -24,7 +24,7 @@ HOST = os.environ.get("ROUTEPILOT_SIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ROUTEPILOT_SIM_PORT", "8765"))
 TOKEN = os.environ.get("ROUTEPILOT_PORTAL_TOKEN", "")
 ROUTER = os.environ.get("ROUTEPILOT_ROUTER_URL", "https://router.project-osrm.org").rstrip("/")
-USER_AGENT = "RoutePilot-Simulator/3.5.1 (+https://github.com/xSophie1119/T112botje)"
+USER_AGENT = "RoutePilot-Simulator/3.5.2 (+https://github.com/xSophie1119/T112botje)"
 
 # Regiovervoer Midden-Brabant: 8 gemeenten vormen het binnengebied.
 INNER_MUNICIPALITIES={
@@ -263,7 +263,7 @@ with db() as con:
     # tabel en blijven behouden.
     con.execute(
         "UPDATE scenarios SET generator_version='legacy' "
-        "WHERE generator_version IS NULL OR generator_version='' OR generator_version<>'3.5.1'"
+        "WHERE generator_version IS NULL OR generator_version='' OR generator_version<>'3.5.2'"
     )
     con.execute(
         "UPDATE batch_runs SET status='failed',stage='Onderbroken',"
@@ -470,7 +470,7 @@ def _pdok_geocode(query,label,municipality,zone,category):
     }
 
 def hospital_locations():
-    # V3.5.1: exact de vijf vaste ziekenhuizen; oude cache met Amphia
+    # V3.5.2: exact de vijf vaste ziekenhuizen; oude cache met Amphia
     # Oosterhout wordt bewust niet hergebruikt.
     cache_area="__hospitals_static_v351__"
     cached=_cached_training_locations(cache_area,"hospital")
@@ -526,7 +526,7 @@ def _nearest_inner_municipality(lat,lon):
     return candidates[0] if candidates else (1e9,"","")
 
 def care_locations():
-    # V3.5.1: géén Overpass-afhankelijkheid meer. De locaties zelf zijn
+    # V3.5.2: géén Overpass-afhankelijkheid meer. De locaties zelf zijn
     # hardcoded; PDOK wordt alleen gebruikt om het vaste bezoekadres naar
     # coördinaten om te zetten en daarna wordt het resultaat lokaal gecachet.
     cache_area="__care_static_v351__"
@@ -993,7 +993,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.5.1",
+            "3.5.2",
             category,
             origin.get("zone",""),destination.get("zone",""),
             origin.get("municipality",""),destination.get("municipality",""),
@@ -1013,7 +1013,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.5.1",
+            "3.5.2",
             category,
             origin.get("zone",""),destination.get("zone",""),
             origin.get("municipality",""),destination.get("municipality",""),
@@ -1081,16 +1081,33 @@ def _least_used_choice(rng,items,usage,max_repeat=None):
         candidates=shuffled
     return rng.choice(candidates)
 
+def _weighted_hospital_choice(rng,hospitals):
+    if not hospitals:
+        return None
+    primary=[]
+    secondary=[]
+    for item in hospitals:
+        base=item.get("name","").split(" · ",1)[0].lower()
+        if base in ("etz elisabeth","etz tweesteden"):
+            primary.append(item)
+        else:
+            secondary.append(item)
+
+    # 90% Tilburgse ETZ-locaties; binnen die groep gelijk verdeeld.
+    if primary and (not secondary or rng.random()<0.90):
+        return rng.choice(primary)
+    return rng.choice(secondary or primary)
+
 def _pick_pair_for_category(
     rng,pools,category,used_pairs,origin_usage,destination_usage,
     municipality_usage,outside_pickups,target_outside_pickups
 ):
     for _ in range(900):
         if category=="hospital":
-            dest_pool=pools["hospital"]
-            destination=_least_used_choice(
-                rng,dest_pool,destination_usage,max_repeat=2
-            )
+            # Ziekenhuisbestemmingen mogen bewust dubbel voorkomen.
+            # Alleen exact dezelfde ophaaladres→ziekenhuiscombinatie wordt
+            # via used_pairs tegengehouden.
+            destination=_weighted_hospital_choice(rng,pools["hospital"])
         elif category=="care":
             destination=_least_used_choice(
                 rng,pools["care"],destination_usage,max_repeat=1
@@ -1131,19 +1148,26 @@ def _pick_pair_for_category(
             origin_pool=pools["outside"] if want_outside else pools["inside"]
 
         # Kies bij voorkeur gemeenten die in deze batch nog weinig aan bod kwamen.
+        # Voor ziekenhuisritten is een unieke ophaallocatie belangrijker dan
+        # perfecte gemeentebalans; dat voorkomt vastlopen op het laatste slot.
         candidates=list(origin_pool)
         rng.shuffle(candidates)
         if not candidates:
             continue
-        min_mun=min(
-            municipality_usage.get(x.get("municipality",""),0)
-            for x in candidates
-        )
-        spread=[
-            x for x in candidates
-            if municipality_usage.get(x.get("municipality",""),0)<=min_mun+1
-        ]
-        origin=_least_used_choice(rng,spread,origin_usage,max_repeat=1)
+        if category=="hospital":
+            origin=_least_used_choice(rng,candidates,origin_usage,max_repeat=1)
+            if origin is None:
+                origin=_least_used_choice(rng,candidates,origin_usage,max_repeat=None)
+        else:
+            min_mun=min(
+                municipality_usage.get(x.get("municipality",""),0)
+                for x in candidates
+            )
+            spread=[
+                x for x in candidates
+                if municipality_usage.get(x.get("municipality",""),0)<=min_mun+1
+            ]
+            origin=_least_used_choice(rng,spread,origin_usage,max_repeat=1)
         if origin is None:
             continue
 
@@ -1386,7 +1410,7 @@ def source_status():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.5.1"
+    server_version = "RoutePilotSimulator/3.5.2"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -1420,7 +1444,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.5.1", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.5.2", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/source-status":
             return self.send_json(source_status())
@@ -1495,7 +1519,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = con.execute("SELECT * FROM scenarios ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
                 else:
                     rows = con.execute(
-                        "SELECT * FROM scenarios WHERE generator_version='3.5.1' ORDER BY id DESC LIMIT ?",
+                        "SELECT * FROM scenarios WHERE generator_version='3.5.2' ORDER BY id DESC LIMIT ?",
                         (limit,)
                     ).fetchall()
             out = []
@@ -1508,10 +1532,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stats":
             with db_lock, db() as con:
-                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1'").fetchone()[0]
-                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1' AND status='accepted'").fetchone()[0]
-                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1' AND status='rejected'").fetchone()[0]
-                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.1' AND status='error'").fetchone()[0]
+                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.2'").fetchone()[0]
+                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.2' AND status='accepted'").fetchone()[0]
+                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.2' AND status='rejected'").fetchone()[0]
+                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.2' AND status='error'").fetchone()[0]
                 corrections = con.execute("SELECT COUNT(*) FROM corrections WHERE active=1").fetchone()[0]
                 driver_trips = con.execute("SELECT COUNT(*) FROM driver_trips").fetchone()[0]
             return self.send_json({
@@ -1676,7 +1700,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.5.1 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.5.2 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
