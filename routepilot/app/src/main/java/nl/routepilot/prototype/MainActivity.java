@@ -1,27 +1,46 @@
 package nl.routepilot.prototype;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Space;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.osmdroid.config.Configuration;
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
+import org.osmdroid.util.BoundingBox;
+import org.osmdroid.util.GeoPoint;
+import org.osmdroid.views.MapView;
+import org.osmdroid.views.overlay.CopyrightOverlay;
+import org.osmdroid.views.overlay.Marker;
+import org.osmdroid.views.overlay.Polyline;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
-public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
+public class MainActivity extends Activity implements LocationListener, TextToSpeech.OnInitListener {
 
-    private final int BG = Color.rgb(11, 18, 32);
-    private final int CARD = Color.rgb(20, 30, 48);
-    private final int CARD_ALT = Color.rgb(25, 38, 60);
+    private static final int LOCATION_REQUEST = 2002;
+
+    private final int BG = Color.rgb(9, 15, 27);
+    private final int PANEL = Color.rgb(17, 27, 44);
     private final int TEXT = Color.rgb(241, 245, 249);
     private final int MUTED = Color.rgb(148, 163, 184);
     private final int BLUE = Color.rgb(56, 189, 248);
@@ -29,245 +48,422 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     private final int ORANGE = Color.rgb(251, 146, 60);
     private final int RED = Color.rgb(248, 113, 113);
 
+    private MapView map;
+    private Marker locationMarker;
+    private Marker destinationMarker;
+    private Polyline routeLine;
+    private final List<Marker> restrictionMarkers = new ArrayList<>();
+
+    private LocationManager locationManager;
+    private Location currentLocation;
+    private boolean centeredOnce = false;
     private TextToSpeech tts;
-    private TextView tripStatus;
-    private Button startButton;
-    private boolean testRideRunning = false;
+
+    private EditText destinationInput;
+    private TextView gpsStatus;
+    private TextView routeTitle;
+    private TextView routeMeta;
+    private TextView warningText;
+    private Button searchButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        tts = new TextToSpeech(this, this);
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setBackgroundColor(BG);
+        Configuration.getInstance().setUserAgentValue(OnlineServices.USER_AGENT);
+        Configuration.getInstance().setTileDownloadThreads((short) 2);
+        Configuration.getInstance().setTileFileSystemThreads((short) 2);
+
+        tts = new TextToSpeech(this, this);
+        locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(18), dp(20), dp(28));
         root.setBackgroundColor(BG);
-        scroll.addView(root, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
 
-        TextView brand = text("ROUTEPILOT", 12, BLUE, Typeface.BOLD);
-        root.addView(brand);
+        map = new MapView(this);
+        map.setTileSource(TileSourceFactory.MAPNIK);
+        map.setMultiTouchControls(true);
+        map.setTilesScaledToDpi(true);
+        map.setMinZoomLevel(4.0);
+        map.setMaxZoomLevel(19.0);
+        map.getController().setZoom(13.5);
+        map.getController().setCenter(new GeoPoint(51.5555, 5.0913));
+        map.getOverlays().add(new CopyrightOverlay(this));
 
-        TextView title = text("Rustiger rijden. Slimmer aankomen.", 27, TEXT, Typeface.BOLD);
-        title.setPadding(0, dp(5), 0, dp(2));
-        root.addView(title);
+        LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.54f);
+        root.addView(map, mapLp);
 
-        TextView subtitle = text("Prototype v0.1 • offline testbuild", 13, MUTED, Typeface.NORMAL);
-        root.addView(subtitle);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(false);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(14), dp(16), dp(24));
+        panel.setBackgroundColor(BG);
+        scroll.addView(panel);
 
-        root.addView(space(18));
+        LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.46f);
+        root.addView(scroll, scrollLp);
 
-        LinearLayout statusCard = card(CARD);
-        TextView statusLabel = text("RITSTATUS", 11, MUTED, Typeface.BOLD);
-        statusCard.addView(statusLabel);
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
 
-        tripStatus = text("Klaar voor een testrit", 21, TEXT, Typeface.BOLD);
-        tripStatus.setPadding(0, dp(5), 0, dp(3));
-        statusCard.addView(tripStatus);
+        TextView logo = text("ROUTEPILOT  ONLINE", 13, BLUE, Typeface.BOLD);
+        top.addView(logo, new LinearLayout.LayoutParams(0, dp(36), 1f));
 
-        TextView statusSub = text("Live routering is in deze APK nog uitgeschakeld.", 13, MUTED, Typeface.NORMAL);
-        statusCard.addView(statusSub);
+        Button myLocation = smallButton("◎ GPS");
+        myLocation.setOnClickListener(v -> centerOnMe());
+        top.addView(myLocation, new LinearLayout.LayoutParams(dp(88), dp(38)));
+        panel.addView(top);
 
-        startButton = primaryButton("Start gesimuleerde testrit");
-        startButton.setOnClickListener(v -> toggleTestRide());
-        LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
-        startLp.topMargin = dp(14);
-        statusCard.addView(startButton, startLp);
+        gpsStatus = text("Locatie wordt gestart…", 12, MUTED, Typeface.NORMAL);
+        gpsStatus.setPadding(0, 0, 0, dp(10));
+        panel.addView(gpsStatus);
 
-        root.addView(statusCard);
-        root.addView(space(12));
+        LinearLayout searchRow = new LinearLayout(this);
+        searchRow.setOrientation(LinearLayout.HORIZONTAL);
+        destinationInput = new EditText(this);
+        destinationInput.setHint("Waar wil je heen?");
+        destinationInput.setHintTextColor(MUTED);
+        destinationInput.setTextColor(TEXT);
+        destinationInput.setTextSize(15);
+        destinationInput.setSingleLine(true);
+        destinationInput.setPadding(dp(13), 0, dp(10), 0);
+        destinationInput.setBackground(rounded(PANEL, 13));
 
-        LinearLayout vehicleCard = card(CARD);
-        vehicleCard.addView(text("VOERTUIGPROFIEL", 11, MUTED, Typeface.BOLD));
-        vehicleCard.addView(text("Rolstoelbus", 20, TEXT, Typeface.BOLD));
-        vehicleCard.addView(space(9));
+        searchButton = smallButton("Route");
+        searchButton.setOnClickListener(v -> searchAndRoute());
 
-        LinearLayout specs = new LinearLayout(this);
-        specs.setOrientation(LinearLayout.HORIZONTAL);
-        specs.setWeightSum(4f);
-        specs.addView(spec("5,93 m", "lengte"), weighted());
-        specs.addView(spec("2,76 m", "hoogte"), weighted());
-        specs.addView(spec("2,34 m", "breedte"), weighted());
-        specs.addView(spec("3.500 kg", "max."), weighted());
-        vehicleCard.addView(specs);
+        searchRow.addView(destinationInput, new LinearLayout.LayoutParams(0, dp(50), 1f));
+        LinearLayout.LayoutParams sb = new LinearLayout.LayoutParams(dp(92), dp(50));
+        sb.leftMargin = dp(8);
+        searchRow.addView(searchButton, sb);
+        panel.addView(searchRow);
 
-        TextView lift = text("✓ Achterlift ingesteld", 13, GREEN, Typeface.BOLD);
-        lift.setPadding(0, dp(13), 0, 0);
-        vehicleCard.addView(lift);
+        routeTitle = text("Nog geen route", 19, TEXT, Typeface.BOLD);
+        routeTitle.setPadding(0, dp(14), 0, dp(2));
+        panel.addView(routeTitle);
 
-        root.addView(vehicleCard);
-        root.addView(space(12));
+        routeMeta = text("Zoek een bestemming om online te routeren.", 13, MUTED, Typeface.NORMAL);
+        panel.addView(routeMeta);
 
-        root.addView(sectionTitle("Routewaarschuwingen"));
+        TextView vehicle = text(
+                "🚐 Rolstoelbus  •  5,93 m  •  2,76 m hoog  •  2,34 m breed  •  3.500 kg",
+                12, GREEN, Typeface.BOLD);
+        vehicle.setPadding(0, dp(11), 0, dp(10));
+        panel.addView(vehicle);
 
-        LinearLayout warning1 = warningCard(
-                "BUSSLUIS",
-                "Niet toegankelijk",
-                "RoutePilot zou deze doorgang vermijden voor jouw voertuig.",
-                RED
-        );
-        root.addView(warning1);
-        root.addView(space(9));
+        warningText = text(
+                "Voertuigscan: wacht op route. RoutePilot controleert online OSM-objecten op bussluizen en relevante hoogte-, breedte- en gewichtslimieten.",
+                13, MUTED, Typeface.NORMAL);
+        warningText.setPadding(dp(12), dp(11), dp(12), dp(11));
+        warningText.setBackground(rounded(PANEL, 12));
+        panel.addView(warningText);
 
-        LinearLayout warning2 = warningCard(
-                "BUSBAAN",
-                "Toegestaan met vrijstelling",
-                "Gemarkeerd als toegestaan in het Tilburg-profiel.",
-                GREEN
-        );
-        root.addView(warning2);
-        root.addView(space(9));
+        TextView disclaimer = text(
+                "Prototype: OSRM berekent momenteel een gewone autoroute. De extra voertuigscan waarschuwt, maar blokkeert een ongeschikte route nog niet automatisch. Verkeersborden blijven altijd leidend.",
+                11, MUTED, Typeface.NORMAL);
+        disclaimer.setPadding(0, dp(12), 0, 0);
+        panel.addView(disclaimer);
 
-        LinearLayout warning3 = warningCard(
-                "HOOGTE",
-                "Controlepunt: 2,80 m",
-                "Je voertuig is 2,76 m hoog. In een echte route volgt hier een veiligheidsmarge.",
-                ORANGE
-        );
-        root.addView(warning3);
-
-        root.addView(space(18));
-        root.addView(sectionTitle("Aankomstassistent"));
-
-        LinearLayout arrival = card(CARD_ALT);
-        arrival.addView(text("Bestemming simulatie", 18, TEXT, Typeface.BOLD));
-        arrival.addView(text("Station Tilburg • achterliftmodus", 13, MUTED, Typeface.NORMAL));
-
-        TextView advice = text(
-                "Advies: zoek een vlakke stopplek met vrije ruimte achter de bus. Controleer fietspad, paaltjes en uitstapruimte vóór je de lift bedient.",
-                14, TEXT, Typeface.NORMAL);
-        advice.setPadding(0, dp(12), 0, dp(13));
-        arrival.addView(advice);
-
-        Button speak = secondaryButton("🔊 Test gesproken waarschuwing");
-        speak.setOnClickListener(v -> speakWarning());
-        arrival.addView(speak, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
-
-        root.addView(arrival);
-        root.addView(space(18));
-
-        TextView footer = text(
-                "Dit is een testprototype en geen navigatiesysteem. Verkeersborden en actuele verkeersregels blijven leidend.",
-                12, MUTED, Typeface.NORMAL);
-        footer.setGravity(Gravity.CENTER);
-        root.addView(footer);
-
-        setContentView(scroll);
+        setContentView(root);
+        startLocation();
     }
 
-    private void toggleTestRide() {
-        testRideRunning = !testRideRunning;
-        if (testRideRunning) {
-            tripStatus.setText("Testrit actief • 6,5 km");
-            tripStatus.setTextColor(GREEN);
-            startButton.setText("Stop testrit");
-            Toast.makeText(this, "Simulatie gestart", Toast.LENGTH_SHORT).show();
-            speak("Testrit gestart. RoutePilot bewaakt voertuigbeperkingen.");
-        } else {
-            tripStatus.setText("Klaar voor een testrit");
-            tripStatus.setTextColor(TEXT);
-            startButton.setText("Start gesimuleerde testrit");
-            Toast.makeText(this, "Simulatie gestopt", Toast.LENGTH_SHORT).show();
+    private void startLocation() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+            }, LOCATION_REQUEST);
+            return;
+        }
+
+        try {
+            gpsStatus.setText("GPS actief • wacht op positie…");
+            locationManager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER, 1500L, 3f, this);
+            locationManager.requestLocationUpdates(
+                    LocationManager.NETWORK_PROVIDER, 3000L, 10f, this);
+
+            Location last = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            if (last == null) {
+                last = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+            }
+            if (last != null) onLocationChanged(last);
+        } catch (Exception e) {
+            gpsStatus.setText("Kon locatie niet starten: " + e.getMessage());
         }
     }
 
-    private void speakWarning() {
-        speak("Let op. Mogelijke hoogtebeperking over 400 meter. Controleer de bebording.");
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == LOCATION_REQUEST) {
+            if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+                startLocation();
+            } else {
+                gpsStatus.setText("Locatietoegang geweigerd. Route vanaf GPS is niet beschikbaar.");
+            }
+        }
+    }
+
+    @Override
+    public void onLocationChanged(Location location) {
+        currentLocation = location;
+        GeoPoint point = new GeoPoint(location.getLatitude(), location.getLongitude());
+
+        if (locationMarker == null) {
+            locationMarker = new Marker(map);
+            locationMarker.setTitle("Mijn locatie");
+            locationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+            map.getOverlays().add(locationMarker);
+        }
+        locationMarker.setPosition(point);
+
+        int accuracy = Math.round(location.getAccuracy());
+        gpsStatus.setText(String.format(Locale.NL,
+                "GPS actief • nauwkeurigheid ±%d m", accuracy));
+
+        if (!centeredOnce) {
+            centeredOnce = true;
+            map.getController().setZoom(16.0);
+            map.getController().animateTo(point);
+        }
+        map.invalidate();
+    }
+
+    private void centerOnMe() {
+        if (currentLocation == null) {
+            Toast.makeText(this, "Nog geen GPS-positie.", Toast.LENGTH_SHORT).show();
+            startLocation();
+            return;
+        }
+        map.getController().setZoom(16.5);
+        map.getController().animateTo(new GeoPoint(
+                currentLocation.getLatitude(), currentLocation.getLongitude()));
+    }
+
+    private void searchAndRoute() {
+        String query = destinationInput.getText().toString().trim();
+        if (query.length() < 3) {
+            Toast.makeText(this, "Vul een bestemming in.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (currentLocation == null) {
+            Toast.makeText(this, "Wacht eerst op je GPS-positie.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        hideKeyboard();
+        searchButton.setEnabled(false);
+        searchButton.setText("…");
+        routeTitle.setText("Bestemming zoeken…");
+        routeMeta.setText("Online zoeken via OpenStreetMap.");
+
+        new Thread(() -> {
+            try {
+                OnlineServices.SearchResult destination = OnlineServices.searchPlace(query);
+                runOnUiThread(() -> showDestination(destination));
+
+                OnlineServices.RouteResult route = OnlineServices.route(
+                        currentLocation.getLatitude(),
+                        currentLocation.getLongitude(),
+                        destination.lat,
+                        destination.lon
+                );
+
+                runOnUiThread(() -> showRoute(destination, route));
+
+                List<OnlineServices.Restriction> restrictions;
+                try {
+                    restrictions = OnlineServices.scanRestrictions(route.points);
+                } catch (Exception scanError) {
+                    restrictions = new ArrayList<>();
+                    final String msg = scanError.getMessage();
+                    runOnUiThread(() -> warningText.setText(
+                            "Voertuigscan tijdelijk niet beschikbaar: " + msg));
+                }
+
+                final List<OnlineServices.Restriction> finalRestrictions = restrictions;
+                runOnUiThread(() -> showRestrictions(finalRestrictions));
+
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    routeTitle.setText("Route niet geladen");
+                    routeMeta.setText(e.getMessage() == null ? "Onbekende fout." : e.getMessage());
+                    Toast.makeText(this, routeMeta.getText(), Toast.LENGTH_LONG).show();
+                });
+            } finally {
+                runOnUiThread(() -> {
+                    searchButton.setEnabled(true);
+                    searchButton.setText("Route");
+                });
+            }
+        }).start();
+    }
+
+    private void showDestination(OnlineServices.SearchResult destination) {
+        if (destinationMarker == null) {
+            destinationMarker = new Marker(map);
+            destinationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+            map.getOverlays().add(destinationMarker);
+        }
+        destinationMarker.setPosition(new GeoPoint(destination.lat, destination.lon));
+        destinationMarker.setTitle(destination.label);
+        routeTitle.setText("Route berekenen…");
+        routeMeta.setText(destination.label);
+        map.invalidate();
+    }
+
+    private void showRoute(OnlineServices.SearchResult destination,
+                           OnlineServices.RouteResult route) {
+        if (routeLine != null) map.getOverlays().remove(routeLine);
+
+        routeLine = new Polyline(map);
+        routeLine.setPoints(route.points);
+        routeLine.getOutlinePaint().setColor(BLUE);
+        routeLine.getOutlinePaint().setStrokeWidth(dp(6));
+        map.getOverlays().add(routeLine);
+
+        for (Marker m : restrictionMarkers) map.getOverlays().remove(m);
+        restrictionMarkers.clear();
+
+        double km = route.distanceMeters / 1000.0;
+        int minutes = (int) Math.round(route.durationSeconds / 60.0);
+        routeTitle.setText(String.format(Locale.NL, "%.1f km • %d min", km, minutes));
+        routeMeta.setText(route.firstInstruction + "  •  " + shortLabel(destination.label));
+
+        fitRoute(route.points);
+        warningText.setText("Voertuigscan loopt…");
+
+        speak(String.format(Locale.NL,
+                "Route gevonden. %.1f kilometer, ongeveer %d minuten. %s",
+                km, minutes, route.firstInstruction));
+    }
+
+    private void showRestrictions(List<OnlineServices.Restriction> restrictions) {
+        if (restrictions == null || restrictions.isEmpty()) {
+            warningText.setText(
+                    "✓ Online voertuigscan: geen relevante bussluis of kritieke maat-/gewichtslimiet gevonden vlak langs deze route. Dit is geen garantie dat de route geschikt is.");
+            warningText.setTextColor(GREEN);
+            return;
+        }
+
+        int critical = 0;
+        StringBuilder sb = new StringBuilder();
+        sb.append("⚠ Online voertuigscan: ").append(restrictions.size())
+                .append(" aandachtspunt").append(restrictions.size() == 1 ? "" : "en").append("\n");
+
+        int shown = 0;
+        for (OnlineServices.Restriction r : restrictions) {
+            if (r.critical) critical++;
+            if (shown < 4) {
+                sb.append("\n• ").append(r.type).append(": ").append(r.description);
+                shown++;
+            }
+
+            Marker marker = new Marker(map);
+            marker.setPosition(new GeoPoint(r.lat, r.lon));
+            marker.setTitle(r.type);
+            marker.setSnippet(r.description);
+            marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+            restrictionMarkers.add(marker);
+            map.getOverlays().add(marker);
+        }
+        if (restrictions.size() > shown) {
+            sb.append("\n\n+ ").append(restrictions.size() - shown).append(" meer op de kaart.");
+        }
+
+        warningText.setText(sb.toString());
+        warningText.setTextColor(critical > 0 ? RED : ORANGE);
+        map.invalidate();
+
+        if (critical > 0) {
+            speak("Let op. RoutePilot heeft " + critical
+                    + " mogelijk kritieke voertuigbeperking gevonden. Controleer de kaart en bebording.");
+        }
+    }
+
+    private void fitRoute(List<GeoPoint> points) {
+        if (points == null || points.isEmpty()) return;
+        double north = -90, south = 90, east = -180, west = 180;
+        for (GeoPoint p : points) {
+            north = Math.max(north, p.getLatitude());
+            south = Math.min(south, p.getLatitude());
+            east = Math.max(east, p.getLongitude());
+            west = Math.min(west, p.getLongitude());
+        }
+        try {
+            map.zoomToBoundingBox(new BoundingBox(north, east, south, west), true, dp(55));
+        } catch (Exception ignored) {
+            map.getController().animateTo(points.get(points.size() / 2));
+        }
+    }
+
+    private String shortLabel(String label) {
+        if (label == null) return "";
+        String[] p = label.split(",");
+        if (p.length <= 2) return label;
+        return p[0].trim() + ", " + p[1].trim();
+    }
+
+    private void hideKeyboard() {
+        View v = getCurrentFocus();
+        if (v == null) v = destinationInput;
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
     }
 
     private void speak(String message) {
-        if (tts != null) {
-            tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "routepilot");
-        }
+        if (tts != null) tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "routepilot-online");
     }
 
     @Override
     public void onInit(int status) {
         if (status == TextToSpeech.SUCCESS && tts != null) {
             tts.setLanguage(new Locale("nl", "NL"));
-            tts.setSpeechRate(0.95f);
+            tts.setSpeechRate(0.96f);
         }
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        if (map != null) map.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        if (map != null) map.onPause();
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
+        try {
+            if (locationManager != null) locationManager.removeUpdates(this);
+        } catch (Exception ignored) {}
         if (tts != null) {
             tts.stop();
             tts.shutdown();
         }
+        if (map != null) map.onDetach();
         super.onDestroy();
     }
 
-    private LinearLayout warningCard(String tag, String title, String body, int accent) {
-        LinearLayout box = card(CARD);
-        TextView tagView = text(tag, 11, accent, Typeface.BOLD);
-        box.addView(tagView);
-
-        TextView titleView = text(title, 17, TEXT, Typeface.BOLD);
-        titleView.setPadding(0, dp(4), 0, dp(3));
-        box.addView(titleView);
-
-        box.addView(text(body, 13, MUTED, Typeface.NORMAL));
-        return box;
-    }
-
-    private LinearLayout spec(String value, String label) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER);
-        box.addView(text(value, 15, TEXT, Typeface.BOLD));
-        TextView l = text(label, 10, MUTED, Typeface.NORMAL);
-        l.setGravity(Gravity.CENTER);
-        box.addView(l);
-        return box;
-    }
-
-    private LinearLayout.LayoutParams weighted() {
-        return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-    }
-
-    private TextView sectionTitle(String s) {
-        TextView v = text(s, 15, TEXT, Typeface.BOLD);
-        v.setPadding(0, 0, 0, dp(9));
-        return v;
-    }
-
-    private LinearLayout card(int color) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(16), dp(16), dp(16), dp(16));
-        box.setBackground(rounded(color, 18));
-        return box;
-    }
-
-    private Button primaryButton(String label) {
+    private Button smallButton(String label) {
         Button b = new Button(this);
         b.setText(label);
-        b.setTextSize(14);
+        b.setTextSize(13);
         b.setTextColor(Color.rgb(3, 18, 28));
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         b.setAllCaps(false);
-        b.setBackground(rounded(BLUE, 14));
-        return b;
-    }
-
-    private Button secondaryButton(String label) {
-        Button b = new Button(this);
-        b.setText(label);
-        b.setTextSize(14);
-        b.setTextColor(TEXT);
-        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        b.setAllCaps(false);
-        b.setBackground(rounded(Color.rgb(38, 54, 78), 14));
+        b.setBackground(rounded(BLUE, 13));
         return b;
     }
 
@@ -277,14 +473,8 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         v.setTextSize(sp);
         v.setTextColor(color);
         v.setTypeface(Typeface.DEFAULT, style);
-        v.setLineSpacing(0, 1.12f);
+        v.setLineSpacing(0, 1.10f);
         return v;
-    }
-
-    private Space space(int heightDp) {
-        Space s = new Space(this);
-        s.setLayoutParams(new LinearLayout.LayoutParams(1, dp(heightDp)));
-        return s;
     }
 
     private android.graphics.drawable.GradientDrawable rounded(int color, int radiusDp) {
