@@ -974,56 +974,106 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         }
     }
 
+    private static final class WarningCandidate {
+        int source; // 1 restriction, 2 traffic, 3 sign
+        int index = -1;
+        String key = "";
+        int priority;
+        double aheadMeters;
+        String warning = "";
+        String spoken = "";
+        String status = "";
+    }
+
     private void updateGeofencedWarnings(double lat, double lon, int routeIndex) {
         currentWarning = "";
+        WarningCandidate best = null;
 
-        for (int i = 0; i < currentRoute.restrictions.size(); i++) {
-            if (announcedRestrictions.contains(i)) continue;
-            OnlineServices.Restriction r = currentRoute.restrictions.get(i);
-            if (r.informational) continue;
-            int target = OnlineServices.closestRoutePointIndex(r.lat, r.lon, currentRoute.points);
-            if (!isAhead(routeIndex, target)) continue;
-            double d = OnlineServices.distanceMeters(lat, lon, r.lat, r.lon);
-            if (d < (r.critical ? 520 : 360)) {
-                announcedRestrictions.add(i);
-                currentWarning = r.type + ": " + r.description;
-                RoutePilotStore.markWarning(this);
-                navStatus.setText(r.critical
-                        ? "⚠ KRITIEKE VOERTUIGWAARSCHUWING" : "⚠ ROUTE-AANDACHTSPUNT");
-                speak("Let op. " + r.type + ". " + r.description);
+        if (currentRoute.restrictions != null) {
+            for (int i = 0; i < currentRoute.restrictions.size(); i++) {
+                if (announcedRestrictions.contains(i)) continue;
+                OnlineServices.Restriction r = currentRoute.restrictions.get(i);
+                if (r.informational) continue;
+                int target = OnlineServices.closestRoutePointIndex(r.lat, r.lon, currentRoute.points);
+                double ahead = LookAheadEngine.distanceAlong(currentRoute.points, routeIndex, target);
+                double trigger = r.critical ? 700.0 : 430.0;
+                if (ahead < 0 || ahead > trigger) continue;
+
+                WarningCandidate w = new WarningCandidate();
+                w.source = 1; w.index = i;
+                w.priority = r.critical ? 120 : 75;
+                w.aheadMeters = ahead;
+                w.warning = r.type + ": " + r.description;
+                w.spoken = "Let op. Over " + spokenDistance(ahead) + ". "
+                        + r.type + ". " + r.description;
+                w.status = r.critical
+                        ? "⚠ KRITIEKE VOERTUIGWAARSCHUWING"
+                        : "⚠ ROUTE-AANDACHTSPUNT";
+                best = betterWarning(best, w);
             }
         }
 
-        for (int i = 0; i < currentRoute.trafficEvents.size(); i++) {
-            if (announcedTrafficEvents.contains(i)) continue;
-            LiveTrafficService.TrafficEvent e = currentRoute.trafficEvents.get(i);
-            int target = OnlineServices.closestRoutePointIndex(e.lat, e.lon, currentRoute.points);
-            if (!isAhead(routeIndex, target)) continue;
-            double d = OnlineServices.distanceMeters(lat, lon, e.lat, e.lon);
-            double trigger = e.closure ? 900 : 520;
-            if (d < trigger) {
-                announcedTrafficEvents.add(i);
-                currentWarning = e.type + ": " + e.description;
-                RoutePilotStore.markWarning(this);
-                navStatus.setText(e.closure
-                        ? "🚧 ACTUELE AFSLUITING VOORUIT" : "📡 ACTUELE VERKEERSINFO");
-                speak((e.closure ? "Let op. Actuele afsluiting. " : "Actuele verkeersmelding. ")
-                        + e.description);
+        if (currentRoute.trafficEvents != null) {
+            for (int i = 0; i < currentRoute.trafficEvents.size(); i++) {
+                if (announcedTrafficEvents.contains(i)) continue;
+                LiveTrafficService.TrafficEvent e = currentRoute.trafficEvents.get(i);
+                int target = OnlineServices.closestRoutePointIndex(e.lat, e.lon, currentRoute.points);
+                double ahead = LookAheadEngine.distanceAlong(currentRoute.points, routeIndex, target);
+                double trigger = e.closure ? 1200.0 : 650.0;
+                if (ahead < 0 || ahead > trigger) continue;
+
+                WarningCandidate w = new WarningCandidate();
+                w.source = 2; w.index = i;
+                w.priority = e.closure ? 130 : 65;
+                w.aheadMeters = ahead;
+                w.warning = e.type + ": " + e.description;
+                w.spoken = (e.closure ? "Let op. Actuele afsluiting over "
+                        : "Actuele verkeersmelding over ")
+                        + spokenDistance(ahead) + ". " + e.description;
+                w.status = e.closure
+                        ? "🚧 ACTUELE AFSLUITING VOORUIT"
+                        : "📡 ACTUELE VERKEERSINFO";
+                best = betterWarning(best, w);
             }
         }
 
-        for (RoadDataService.Sign s : currentRoute.roadSigns) {
-            if (!RoadDataService.isRestriction(s) || announcedRoadSigns.contains(s.id)) continue;
-            if (!isAhead(routeIndex, s.routeIndex)) continue;
-            double d = OnlineServices.distanceMeters(lat, lon, s.lat, s.lon);
-            if (d < 450) {
-                announcedRoadSigns.add(s.id);
-                currentWarning = s.description();
-                RoutePilotStore.markWarning(this);
-                navStatus.setText("🛑 OFFICIEEL VERKEERSBORD VOORUIT");
-                speak("Let op. " + s.description());
+        if (currentRoute.roadSigns != null) {
+            for (RoadDataService.Sign s : currentRoute.roadSigns) {
+                if (!RoadDataService.isRestriction(s)
+                        || announcedRoadSigns.contains(s.id)) continue;
+                int target = s.routeIndex >= 0 ? s.routeIndex
+                        : OnlineServices.closestRoutePointIndex(s.lat, s.lon, currentRoute.points);
+                double ahead = LookAheadEngine.distanceAlong(currentRoute.points, routeIndex, target);
+                if (ahead < 0 || ahead > 650.0) continue;
+
+                WarningCandidate w = new WarningCandidate();
+                w.source = 3; w.key = s.id;
+                w.priority = 95;
+                w.aheadMeters = ahead;
+                w.warning = s.description();
+                w.spoken = "Let op. Officieel verkeersbord over "
+                        + spokenDistance(ahead) + ". " + s.description();
+                w.status = "🛑 OFFICIEEL VERKEERSBORD VOORUIT";
+                best = betterWarning(best, w);
             }
         }
+
+        if (best == null) return;
+
+        if (best.source == 1) announcedRestrictions.add(best.index);
+        else if (best.source == 2) announcedTrafficEvents.add(best.index);
+        else if (best.source == 3) announcedRoadSigns.add(best.key);
+
+        currentWarning = best.warning;
+        RoutePilotStore.markWarning(this);
+        navStatus.setText(best.status);
+        speak(best.spoken);
+    }
+
+    private WarningCandidate betterWarning(WarningCandidate a, WarningCandidate b) {
+        if (a == null) return b;
+        if (b.priority != a.priority) return b.priority > a.priority ? b : a;
+        return b.aheadMeters < a.aheadMeters ? b : a;
     }
 
     private boolean isAhead(int currentIndex, int targetIndex) {
