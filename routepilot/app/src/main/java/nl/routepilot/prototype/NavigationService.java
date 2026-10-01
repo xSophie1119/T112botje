@@ -60,7 +60,7 @@ public class NavigationService extends Service implements LocationListener {
                 PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
         String title=s.active && !s.instruction.isEmpty()?s.instruction:"RoutePilot navigatie";
         String text=s.active
-                ? String.format(Locale.NL,"%.1f km resterend%s",
+                ? String.format(new Locale("nl","NL"),"%.1f km resterend%s",
                 s.remainingM/1000.0,s.speedLimit>0?" • "+s.speedLimit+" km/u":"")
                 :"Navigatie wordt afgerond";
         Notification.Builder b=Build.VERSION.SDK_INT>=26
