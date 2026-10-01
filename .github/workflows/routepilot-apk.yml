@@ -81,3 +81,24 @@ jobs:
           assert mod.route_score({'distance': 1000, 'duration': 100, 'geometry': {'coordinates': [[5.09,51.55],[5.10,51.56]]}}, [])[0] > 0
           print('simulator smoke test ok')
           PY
+
+
+  simulator-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package Windows simulator
+        run: |
+          test -f routepilot-simulator/START_SIMULATOR_LAN.bat
+          test -f routepilot-simulator/server.py
+          mkdir -p RoutePilot-V3.3.0-PC
+          cp -R routepilot-simulator/* RoutePilot-V3.3.0-PC/
+
+      - name: Upload Windows simulator package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoutePilot-V3.3.0-PC-Simulator
+          path: RoutePilot-V3.3.0-PC
+          if-no-files-found: error
