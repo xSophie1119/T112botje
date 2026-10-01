@@ -23,7 +23,7 @@ HOST = os.environ.get("ROUTEPILOT_SIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ROUTEPILOT_SIM_PORT", "8765"))
 TOKEN = os.environ.get("ROUTEPILOT_PORTAL_TOKEN", "")
 ROUTER = os.environ.get("ROUTEPILOT_ROUTER_URL", "https://router.project-osrm.org").rstrip("/")
-USER_AGENT = "RoutePilot-Simulator/3.3.2 (+https://github.com/xSophie1119/T112botje)"
+USER_AGENT = "RoutePilot-Simulator/3.4.0 (+https://github.com/xSophie1119/T112botje)"
 
 # Public area seeds used only to discover concrete public addresses/POIs.
 # The seed itself is NEVER presented as the final training destination.
@@ -71,6 +71,28 @@ CREATE TABLE IF NOT EXISTS route_cache (
     cache_key TEXT PRIMARY KEY,
     response_json TEXT NOT NULL,
     created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS training_locations (
+    cache_key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    source TEXT NOT NULL DEFAULT 'PDOK',
+    area_name TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS batch_runs (
+    batch_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'queued',
+    stage TEXT NOT NULL DEFAULT 'Wachten',
+    requested_count INTEGER NOT NULL,
+    completed_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    seed INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS driver_trips (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
