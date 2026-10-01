@@ -824,29 +824,68 @@ def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
     return data
 
 
-def simulate_pair(batch_id, origin, destination, corrections):
-    original_o_name, original_o_lat, original_o_lon = origin
-    original_d_name, original_d_lat, original_d_lon = destination
-    created = now_ms()
+def _is_point_destination_exception(origin,destination):
+    o_mun=origin.get("municipality","")
+    d_mun=destination.get("municipality","")
+    o_name=origin.get("name","").lower()
+    d_name=destination.get("name","").lower()
+    municipalities={"Goirle","Hilvarenbeek"}
+    return (
+        (o_mun in municipalities and "etz waalwijk" in d_name)
+        or (d_mun in municipalities and "etz waalwijk" in o_name)
+    )
 
-    # Defaults preserve the exact target even if route generation fails.
-    o_name,o_lat,o_lon=original_o_name,original_o_lat,original_o_lon
-    d_name,d_lat,d_lon=original_d_name,original_d_lat,original_d_lon
+def validate_regio_trip(origin,destination,route_distance_m):
+    o_zone=origin.get("zone","")
+    d_zone=destination.get("zone","")
+
+    if o_zone=="outside" and d_zone=="outside":
+        return False,"buiten→buiten is niet toegestaan"
+
+    if o_zone!="inside" and d_zone!="inside":
+        return False,"rit moet beginnen of eindigen in het binnengebied"
+
+    if route_distance_m<=25000.0:
+        if o_zone=="inside" and d_zone=="inside":
+            return True,"binnen→binnen • ≤25 km"
+        if o_zone=="inside" and d_zone=="outside":
+            return True,"binnen→buiten • ≤25 km"
+        if o_zone=="outside" and d_zone=="inside":
+            return True,"buiten→binnen • ≤25 km"
+
+    if _is_point_destination_exception(origin,destination):
+        return True,"puntbestemming ETZ Waalwijk • Goirle/Hilvarenbeek"
+
+    return False,f"ritafstand {route_distance_m/1000.0:.1f} km > 25 km"
+
+def simulate_pair(batch_id, origin, destination, corrections):
+    original_o_name=origin["name"]
+    original_o_lat=float(origin["lat"])
+    original_o_lon=float(origin["lon"])
+    original_d_name=destination["name"]
+    original_d_lat=float(destination["lat"])
+    original_d_lon=float(destination["lon"])
+    category=destination.get("category","general")
+    created=now_ms()
+
+    o_lat,o_lon=original_o_lat,original_o_lon
+    d_lat,d_lon=original_d_lat,original_d_lon
     o_stop_name=d_stop_name=""
     o_target_stop=d_target_stop=0.0
+    ring_rule=""
 
     success=False
     try:
-        _, route_o_lat, route_o_lon, o_meta = safe_training_endpoint(
-            original_o_name, original_o_lat, original_o_lon
+        _,route_o_lat,route_o_lon,o_meta=safe_training_endpoint(
+            original_o_name,original_o_lat,original_o_lon
         )
-        _, route_d_lat, route_d_lon, d_meta = safe_training_endpoint(
-            original_d_name, original_d_lat, original_d_lon
+        _,route_d_lat,route_d_lon,d_meta=safe_training_endpoint(
+            original_d_name,original_d_lat,original_d_lon
         )
-        data = cached_osrm_route(route_o_lat, route_o_lon, route_d_lat, route_d_lon)
+        data=cached_osrm_route(route_o_lat,route_o_lon,route_d_lat,route_d_lon)
 
-        waypoints = data.get("waypoints") or []
-        if len(waypoints) < 2:
+        waypoints=data.get("waypoints") or []
+        if len(waypoints)<2:
             raise RuntimeError("Router gaf geen exacte begin/eind-waypoints terug.")
 
         o_wp,d_wp=waypoints[0],waypoints[1]
@@ -855,7 +894,6 @@ def simulate_pair(batch_id, origin, destination, corrections):
         if len(o_loc)<2 or len(d_loc)<2:
             raise RuntimeError("Router-waypoint mist coördinaten.")
 
-        # Dit zijn de WERKELIJKE punten waar de route begint/eindigt.
         o_lon,o_lat=float(o_loc[0]),float(o_loc[1])
         d_lon,d_lat=float(d_loc[0]),float(d_loc[1])
         o_stop_name=str(o_wp.get("name") or o_meta.get("road_name") or "route-stoppunt")
@@ -867,9 +905,6 @@ def simulate_pair(batch_id, origin, destination, corrections):
 
         o_target_stop=haversine_m(original_o_lat,original_o_lon,o_lat,o_lon)
         d_target_stop=haversine_m(original_d_lat,original_d_lon,d_lat,d_lon)
-
-        # Een concrete bestemming die te ver van de route-stop ligt is geen
-        # geldige trainingsrit. Niet stilletjes ergens anders laten eindigen.
         if o_target_stop>95.0:
             raise RuntimeError(
                 f"Startlocatie ligt {o_target_stop:.0f} m van het echte route-stoppunt."
@@ -879,27 +914,31 @@ def simulate_pair(batch_id, origin, destination, corrections):
                 f"Eindlocatie ligt {d_target_stop:.0f} m van het echte route-stoppunt."
             )
 
-        if o_meta.get("highway") in FORBIDDEN_ENDPOINT_CLASSES:
-            raise RuntimeError("Startpunt ligt op een verboden wegklasse.")
-        if d_meta.get("highway") in FORBIDDEN_ENDPOINT_CLASSES:
-            raise RuntimeError("Eindpunt ligt op een verboden wegklasse.")
-
         candidates=[]
+        all_route_distances=[]
         for route in data.get("routes",[])[:3]:
             coords=route.get("geometry",{}).get("coordinates",[])
             if not coords:
                 continue
-            # Routegeometrie moet ook werkelijk bij het gerapporteerde
-            # eind-waypoint eindigen.
             last=coords[-1]
             geometry_gap=haversine_m(d_lat,d_lon,float(last[1]),float(last[0]))
             if geometry_gap>12.0:
                 continue
+            distance=float(route.get("distance",0))
+            all_route_distances.append(distance)
             score,hits=route_score(route,corrections)
             candidates.append((score,route,hits))
 
         if not candidates:
             raise RuntimeError("Geen route eindigde betrouwbaar op het opgegeven route-stoppunt.")
+
+        # Voor de 25-km spelregel gebruiken we de kortste door OSRM
+        # gerapporteerde kandidaat. Dit is een simulatorbenadering van de
+        # voorgeschreven routeplanner van Regiovervoer.
+        eligibility_distance=min(all_route_distances)
+        allowed,ring_rule=validate_regio_trip(origin,destination,eligibility_distance)
+        if not allowed:
+            raise RuntimeError("Regiovervoer-regel: "+ring_rule)
 
         candidates.sort(key=lambda x:x[0])
         score,chosen,hits=candidates[0]
@@ -922,7 +961,11 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.4.0",
+            "3.5.0",
+            category,
+            origin.get("zone",""),destination.get("zone",""),
+            origin.get("municipality",""),destination.get("municipality",""),
+            ring_rule,
             float(chosen.get("distance",0)),float(chosen.get("duration",0)),
             float(score),len(hits),
             json.dumps(chosen.get("geometry",{}).get("coordinates",[]),separators=(",",":")),
@@ -938,7 +981,11 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.4.0",
+            "3.5.0",
+            category,
+            origin.get("zone",""),destination.get("zone",""),
+            origin.get("municipality",""),destination.get("municipality",""),
+            ring_rule,
             0,0,0,0,"[]","[]","error","",str(exc)[:500],created,
         )
 
@@ -948,9 +995,11 @@ def simulate_pair(batch_id, origin, destination, corrections):
             batch_id,origin_name,origin_lat,origin_lon,destination_name,destination_lat,destination_lon,
             origin_target_lat,origin_target_lon,destination_target_lat,destination_target_lon,
             origin_stop_name,destination_stop_name,origin_target_to_stop_m,destination_target_to_stop_m,
-            generator_version,distance_m,duration_s,score,correction_hits,geometry_json,
+            generator_version,trip_category,origin_zone,destination_zone,
+            origin_municipality,destination_municipality,ring_rule,
+            distance_m,duration_s,score,correction_hits,geometry_json,
             alternatives_json,status,review_note,error,created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             row,
         )
     return success
