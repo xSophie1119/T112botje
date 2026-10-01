@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RoutePilot Simulator</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">ROUTEPILOT LAB</div>
+      <h1>Simulator & Correctieportaal</h1>
+    </div>
+    <div class="top-actions">
+      <button id="tokenBtn" class="ghost">🔐 Token</button>
+      <button id="exportBtn" class="ghost">⇩ Correcties exporteren</button>
+      <button id="refreshBtn" class="primary">↻ Vernieuwen</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="section-title">Massasimulatie</div>
+        <div class="row">
+          <label class="field grow">
+            <span>Aantal ritten</span>
+            <select id="count">
+              <option>10</option>
+              <option selected>25</option>
+              <option>50</option>
+              <option>100</option>
+              <option>200</option>
+            </select>
+          </label>
+          <label class="field grow">
+            <span>Seed</span>
+            <input id="seed" type="number" value="32026">
+          </label>
+        </div>
+        <button id="simulateBtn" class="primary wide">▶ Simuleer WMO-ritten</button>
+        <div id="simStatus" class="hint">OSRM-routes worden gecachet. Herhalen wordt daardoor veel sneller.</div>
+      </section>
+
+      <section class="stats-grid">
+        <div class="stat"><strong id="statTotal">0</strong><span>simulaties</span></div>
+        <div class="stat good"><strong id="statAccepted">0</strong><span>goedgekeurd</span></div>
+        <div class="stat bad"><strong id="statRejected">0</strong><span>afgekeurd</span></div>
+        <div class="stat"><strong id="statCorrections">0</strong><span>correcties</span></div>
+      </section>
+
+      <section class="card scenarios-card">
+        <div class="section-title row between">
+          <span>Ritten</span>
+          <select id="filter">
+            <option value="all">Alles</option>
+            <option value="new">Nog beoordelen</option>
+            <option value="rejected">Afgekeurd</option>
+            <option value="accepted">Goedgekeurd</option>
+            <option value="error">Fouten</option>
+          </select>
+        </div>
+        <div id="scenarioList" class="scenario-list"></div>
+      </section>
+    </aside>
+
+    <section class="map-shell">
+      <div id="map"></div>
+      <div class="map-toolbar">
+        <button id="fitBtn" class="mapbtn">⌗ Route passen</button>
+        <button id="correctionModeBtn" class="mapbtn">✚ Correctie plaatsen</button>
+        <button id="showCorrectionsBtn" class="mapbtn active">◉ Correcties</button>
+      </div>
+
+      <div id="emptyState" class="empty-state">
+        <div class="empty-icon">🧪</div>
+        <h2>Kies een simulatie</h2>
+        <p>Of genereer eerst een batch virtuele WMO-ritten door Tilburg.</p>
+      </div>
+
+      <aside id="detailPanel" class="detail-panel hidden">
+        <div class="detail-head">
+          <div>
+            <div class="eyebrow">SIMULATIE <span id="detailId"></span></div>
+            <h2 id="detailTitle">Route</h2>
+          </div>
+          <button id="closeDetail" class="iconbtn">×</button>
+        </div>
+
+        <div class="metrics">
+          <div><span>Afstand</span><strong id="detailDistance">—</strong></div>
+          <div><span>Rijtijd</span><strong id="detailDuration">—</strong></div>
+          <div><span>Correcties geraakt</span><strong id="detailHits">—</strong></div>
+          <div><span>Route-score</span><strong id="detailScore">—</strong></div>
+        </div>
+
+        <div class="section-title">Alternatieven</div>
+        <div id="alternatives" class="alternatives"></div>
+
+        <div class="section-title">Jouw beoordeling</div>
+        <textarea id="reviewNote" rows="3" placeholder="Bijv. deze route neemt een onhandige smalle straat..."></textarea>
+        <div class="row">
+          <button id="acceptBtn" class="success grow">✓ Goed</button>
+          <button id="rejectBtn" class="danger grow">✕ Fout</button>
+        </div>
+
+        <div class="section-title">Correctie op kaart</div>
+        <div class="hint">Klik eerst op <b>Correctie plaatsen</b> en daarna op de plek op de kaart.</div>
+      </aside>
+
+      <div id="correctionComposer" class="composer hidden">
+        <div class="composer-head">
+          <strong>Nieuwe RoutePilot-correctie</strong>
+          <button id="cancelCorrection" class="iconbtn">×</button>
+        </div>
+        <div id="pickedLocation" class="coords">Klik een plek op de kaart…</div>
+        <label class="field">
+          <span>Type</span>
+          <select id="correctionType">
+            <option value="avoid">Straat/plek vermijden</option>
+            <option value="prefer">Route juist prefereren</option>
+            <option value="road_closed">Weg afgesloten</option>
+            <option value="too_narrow">Te smal voor rolstoelbus</option>
+            <option value="bus_trap">Bussluis</option>
+            <option value="height_block">Hoogtebeperking</option>
+            <option value="entrance">Echte ingang</option>
+            <option value="good_stop">Goed WMO-stoppunt</option>
+            <option value="bad_stop">Slecht stoppunt</option>
+            <option value="ignore_door_side">Deurzijde hier negeren</option>
+            <option value="bus_lane_allowed">Busbaan hier toegestaan</option>
+            <option value="bus_lane_forbidden">Busbaan hier niet gebruiken</option>
+            <option value="turning_ok">Keerruimte geschikt</option>
+            <option value="lift_ok">Achterliftruimte goed</option>
+            <option value="lift_bad">Achterliftruimte slecht</option>
+          </select>
+        </label>
+        <div class="row">
+          <label class="field grow"><span>Radius (m)</span><input id="radius" type="number" value="45" min="5" max="1000"></label>
+          <label class="field grow"><span>Sterkte</span><select id="strength"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+        </div>
+        <label class="field"><span>Notitie</span><textarea id="correctionNote" rows="2" placeholder="Waarom moet RoutePilot dit weten?"></textarea></label>
+        <button id="saveCorrection" class="primary wide" disabled>Opslaan als RoutePilot-correctie</button>
+      </div>
+    </section>
+
+    <aside class="rightbar">
+      <section class="card">
+        <div class="section-title">Actieve correcties</div>
+        <div id="correctionList" class="correction-list"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-title">Hoe trainen?</div>
+        <ol class="steps">
+          <li>Simuleer 25–100 ritten.</li>
+          <li>Open verdachte routes.</li>
+          <li>Keur goede routes goed.</li>
+          <li>Markeer fouten exact op de kaart.</li>
+          <li>Simuleer opnieuw: correcties beïnvloeden de routekeuze.</li>
+        </ol>
+        <div class="hint">Een correctie is bewust een aparte RoutePilot-laag. Officiële verkeersregels blijven leidend.</div>
+      </section>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
