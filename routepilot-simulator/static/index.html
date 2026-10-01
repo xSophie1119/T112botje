@@ -90,6 +90,7 @@
       <div class="map-toolbar">
         <button id="fitBtn" class="mapbtn">⌗ Route passen</button>
         <button id="correctionModeBtn" class="mapbtn">✚ Correctie plaatsen</button>
+        <button id="routeEditBtn" class="mapbtn">✥ Route slepen</button>
         <button id="showCorrectionsBtn" class="mapbtn active">◉ Correcties</button>
       </div>
 
@@ -139,6 +140,16 @@
 
         <div class="section-title">Alternatieven</div>
         <div id="alternatives" class="alternatives"></div>
+
+        <div class="section-title">Route handmatig aanpassen</div>
+        <div id="routeEditorInfo" class="route-editor-info">
+          <div class="hint">Klik <b>✥ Route slepen</b>. Sleep de witte routepunten of het groene eindpunt. Klik op de route om een extra punt toe te voegen.</div>
+          <div id="routeEditStatus" class="route-edit-status">Niet actief.</div>
+          <div class="row">
+            <button id="resetRouteEditBtn" class="ghost grow" disabled>↶ Reset</button>
+            <button id="saveRouteEditBtn" class="primary grow" disabled>✓ Correcties opslaan</button>
+          </div>
+        </div>
 
         <div class="section-title">Jouw beoordeling</div>
         <textarea id="reviewNote" rows="3" placeholder="Bijv. deze route neemt een onhandige smalle straat..."></textarea>
