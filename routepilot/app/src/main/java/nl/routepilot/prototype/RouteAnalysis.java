@@ -62,8 +62,11 @@ public final class RouteAnalysis {
         if(r.narrowSignals>0){score-=Math.min(24,r.narrowSignals*5);r.reasons.add(r.narrowSignals+" smalle/krappe weg-signaal(en)");}
         if(r.uTurns>0){score-=Math.min(25,r.uTurns*12);r.reasons.add(r.uTurns+" keerbeweging(en) in route");}
         if(r.learnedPenalty>0){score-=r.learnedPenalty;r.reasons.add("route raakt eerder vermeden punten");}
-        if(!r.destinationOnRight){score-=12;r.reasons.add("woning/ingang lijkt links bij aankomst; rechterdeurvoorkeur niet gehaald");}
-        else r.reasons.add("aankomstzijde past bij rechterdeurvoorkeur");
+        if(!r.destinationOnRight){
+            r.reasons.add("rechterdeurvoorkeur niet gehaald; dit verlaagt de veiligheidsscore niet");
+        } else {
+            r.reasons.add("aankomstzijde past bij rechterdeurvoorkeur");
+        }
 
         RoutePilotStore.LocationProfile profile=RoutePilotStore.findProfile(c,destination.lat,destination.lon);
         if(profile!=null && !Double.isNaN(profile.preferredArrivalBearing)){
