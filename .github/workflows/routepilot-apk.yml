@@ -159,6 +159,19 @@ jobs:
           assert len(route.get('waypoints') or []) == 2
           assert route.get('routes')
           print('LIVE OK:', a['name'], '->', b['name'], round(route['routes'][0]['distance']), 'm')
+
+          # Drag-editor: dwing een route via een derde punt en controleer
+          # geometry + drie gesnapte waypoints.
+          mid = pools['inside'][min(3, len(pools['inside'])-1)]
+          edited = mod.osrm_route_through([
+              [a['lat'],a['lon']],
+              [mid['lat'],mid['lon']],
+              [b['lat'],b['lon']],
+          ])
+          assert len(edited['geometry']) >= 2
+          assert len(edited['waypoints']) == 3
+          assert edited['distance_m'] > 0
+          print('ROUTE EDIT LIVE OK:', round(edited['distance_m']), 'm via', mid['name'])
           PY
 
 
@@ -172,12 +185,12 @@ jobs:
         run: |
           test -f routepilot-simulator/START_SIMULATOR_LAN.bat
           test -f routepilot-simulator/server.py
-          mkdir -p RoutePilot-V3.5.2-PC
-          cp -R routepilot-simulator/* RoutePilot-V3.5.2-PC/
+          mkdir -p RoutePilot-V3.6.0-PC
+          cp -R routepilot-simulator/* RoutePilot-V3.6.0-PC/
 
       - name: Upload Windows simulator package
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V3.5.2-PC-Simulator
-          path: RoutePilot-V3.5.2-PC
+          name: RoutePilot-V3.6.0-PC-Simulator
+          path: RoutePilot-V3.6.0-PC
           if-no-files-found: error
