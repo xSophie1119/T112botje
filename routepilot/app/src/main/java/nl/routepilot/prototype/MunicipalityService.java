@@ -9,7 +9,11 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+
+import org.osmdroid.util.GeoPoint;
 
 public final class MunicipalityService {
     private static final String URL_TILBURG =
@@ -32,6 +36,58 @@ public final class MunicipalityService {
         } catch (Exception e) {
             return conservativeFallback(lat, lon);
         }
+    }
+
+    public static List<String> countyCodesForRoute(List<GeoPoint> route) {
+        Set<String> out = new LinkedHashSet<>();
+        if (route == null || route.isEmpty()) return new ArrayList<>(out);
+        try {
+            double minLat=90,maxLat=-90,minLon=180,maxLon=-180;
+            for (GeoPoint p : route) {
+                minLat=Math.min(minLat,p.getLatitude());
+                maxLat=Math.max(maxLat,p.getLatitude());
+                minLon=Math.min(minLon,p.getLongitude());
+                maxLon=Math.max(maxLon,p.getLongitude());
+            }
+            double pad=0.006;
+            String url=String.format(java.util.Locale.US,
+                    "https://api.pdok.nl/kadaster/brk-bestuurlijke-gebieden/ogc/v1/collections/gemeentegebied/items"
+                            + "?bbox=%.6f,%.6f,%.6f,%.6f&f=json&limit=100",
+                    minLon-pad,minLat-pad,maxLon+pad,maxLat+pad);
+            JSONObject root=new JSONObject(get(url));
+            JSONArray features=root.optJSONArray("features");
+            if(features!=null){
+                for(int i=0;i<features.length();i++){
+                    JSONObject feature=features.optJSONObject(i);
+                    JSONObject props=feature==null?null:feature.optJSONObject("properties");
+                    if(props==null)continue;
+                    String code=normalizeCountyCode(props.optString("code",""));
+                    if(code.isEmpty())
+                        code=normalizeCountyCode(props.optString("identificatie",""));
+                    if(!code.isEmpty())out.add(code);
+                }
+            }
+        } catch(Exception ignored) {}
+
+        if(out.isEmpty()){
+            for(GeoPoint p:route){
+                if(isInTilburg(p.getLatitude(),p.getLongitude())){
+                    out.add("GM0855");
+                    break;
+                }
+            }
+        }
+        return new ArrayList<>(out);
+    }
+
+    private static String normalizeCountyCode(String raw) {
+        if(raw==null)return "";
+        String s=raw.trim().toUpperCase(java.util.Locale.ROOT);
+        java.util.regex.Matcher m=java.util.regex.Pattern.compile("GM\\d{4}").matcher(s);
+        if(m.find())return m.group();
+        m=java.util.regex.Pattern.compile("\\b\\d{4}\\b").matcher(s);
+        if(m.find())return "GM"+m.group();
+        return "";
     }
 
     private static void ensureLoaded() throws Exception {
