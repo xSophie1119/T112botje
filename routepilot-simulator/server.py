@@ -1421,6 +1421,30 @@ class Handler(BaseHTTPRequestHandler):
                 100,
                 round((int(snap.get("success_count",0))/requested)*100)
             )
+            with db_lock,db() as con:
+                mix_rows=con.execute(
+                    "SELECT trip_category,COUNT(*) c FROM scenarios "
+                    "WHERE batch_id=? AND status<>'error' GROUP BY trip_category",
+                    (batch_id,)
+                ).fetchall()
+                ring_rows=con.execute(
+                    "SELECT origin_zone||'->'||destination_zone k,COUNT(*) c "
+                    "FROM scenarios WHERE batch_id=? AND status<>'error' "
+                    "GROUP BY origin_zone,destination_zone",
+                    (batch_id,)
+                ).fetchall()
+                unique_origins=con.execute(
+                    "SELECT COUNT(DISTINCT origin_name) FROM scenarios "
+                    "WHERE batch_id=? AND status<>'error'",(batch_id,)
+                ).fetchone()[0]
+                unique_destinations=con.execute(
+                    "SELECT COUNT(DISTINCT destination_name) FROM scenarios "
+                    "WHERE batch_id=? AND status<>'error'",(batch_id,)
+                ).fetchone()[0]
+            snap["mix"]={r["trip_category"]:r["c"] for r in mix_rows}
+            snap["rings"]={r["k"]:r["c"] for r in ring_rows}
+            snap["unique_origins"]=unique_origins
+            snap["unique_destinations"]=unique_destinations
             return self.send_json(snap)
 
         if path == "/api/batches":
