@@ -90,19 +90,106 @@ function toggleCorrectionMode(on){
 }
 map.on('click',e=>{if(state.correctionMode)pickLocation(e.latlng)});
 
-el('simulateBtn').onclick=async()=>{
-  const b=el('simulateBtn');b.disabled=true;b.textContent='Simuleren…';
-  el('simStatus').textContent='Routes worden berekend en tegen jouw correctielaag getest…';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let activeBatchId=null;
+
+function paintBatch(x){
+  const requested=Math.max(1,Number(x.requested_count||1));
+  const success=Number(x.success_count||0);
+  const errors=Number(x.error_count||0);
+  const pct=Math.max(0,Math.min(100,Number(x.progress_pct??Math.round(success/requested*100))));
+  el('batchProgressWrap').classList.remove('hidden');
+  el('batchStage').textContent=x.stage||x.status||'Bezig';
+  el('batchPct').textContent=pct+'%';
+  el('batchProgressBar').style.width=pct+'%';
+  el('batchCounts').textContent=success+'/'+requested+' geldig • '+errors+' afgekeurd • '+Number(x.completed_count||0)+' pogingen';
+  el('simStatus').textContent=x.message||'Batch '+x.batch_id+' wordt uitgevoerd…';
+}
+
+async function pollBatch(batchId){
+  activeBatchId=batchId;
+  const b=el('simulateBtn');
+  b.disabled=true;b.textContent='⏳ Simulator draait…';
+  let lastSuccess=-1;
   try{
-    const x=await api('/api/simulate',{method:'POST',body:JSON.stringify({count:Number(el('count').value),seed:Number(el('seed').value)})});
-    el('simStatus').textContent='Batch '+x.batch_id+' klaar.';
-    await refresh();
-  }catch(e){
-    toast(e.message,true);el('simStatus').textContent=e.message;
+    while(true){
+      const x=await api('/api/batches/'+encodeURIComponent(batchId));
+      paintBatch(x);
+      const success=Number(x.success_count||0);
+      if(success!==lastSuccess && (success===1 || success%4===0)){
+        lastSuccess=success;
+        await refresh();
+      }
+      if(['completed','partial','failed'].includes(x.status)){
+        await refresh();
+        if(x.status==='completed')toast('Trainingsbatch klaar: '+success+' geldige ritten.');
+        else toast(x.message||'Batch niet volledig afgerond.',x.status==='failed');
+        return x;
+      }
+      await sleep(900);
+    }
   }finally{
+    activeBatchId=null;
+    b.disabled=false;b.textContent='▶ Simuleer WMO-ritten';
+  }
+}
+
+el('simulateBtn').onclick=async()=>{
+  const b=el('simulateBtn');
+  b.disabled=true;b.textContent='Batch starten…';
+  el('batchProgressWrap').classList.remove('hidden');
+  el('batchProgressBar').style.width='0%';
+  el('batchPct').textContent='0%';
+  el('batchStage').textContent='Starten';
+  el('simStatus').textContent='De server maakt een batch aan…';
+  try{
+    const x=await api('/api/simulate',{
+      method:'POST',
+      body:JSON.stringify({
+        count:Number(el('count').value),
+        seed:Number(el('seed').value)
+      })
+    });
+    await pollBatch(x.batch_id);
+  }catch(e){
+    toast(e.message,true);
+    el('simStatus').textContent=e.message;
     b.disabled=false;b.textContent='▶ Simuleer WMO-ritten';
   }
 };
+
+el('sourceCheckBtn').onclick=async()=>{
+  const b=el('sourceCheckBtn');
+  b.disabled=true;b.textContent='🩺 Controleren…';
+  try{
+    const x=await api('/api/source-status');
+    const box=el('sourceStatus');
+    box.classList.remove('hidden');
+    box.innerHTML=[
+      '<div class="source-pill '+(x.pdok?.ok?'ok':'bad')+'"><b>PDOK/BAG</b><br>'+esc(x.pdok?.detail||'Geen antwoord')+'</div>',
+      '<div class="source-pill '+(x.osrm?.ok?'ok':'bad')+'"><b>OSRM</b><br>'+esc(x.osrm?.detail||'Geen antwoord')+'</div>',
+      '<div class="source-pill ok"><b>Lokale cache</b><br>'+Number(x.cache?.locations||0)+' bestemmingen • '+Number(x.cache?.routes||0)+' routes</div>'
+    ].join('');
+  }catch(e){
+    toast(e.message,true);
+  }finally{
+    b.disabled=false;b.textContent='🩺 Controleer databronnen';
+  }
+};
+
+async function resumeLatestBatch(){
+  if(activeBatchId)return;
+  try{
+    const x=await api('/api/batches');
+    const latest=(x.batches||[])[0];
+    if(latest && ['queued','running'].includes(latest.status)){
+      paintBatch(latest);
+      pollBatch(latest.batch_id);
+    }else if(latest){
+      paintBatch(latest);
+    }
+  }catch(e){}
+}
 el('refreshBtn').onclick=refresh;
 el('filter').onchange=renderScenarios;
 el('fitBtn').onclick=()=>{if(state.routeLayer)map.fitBounds(state.routeLayer.getBounds(),{padding:[45,45]})};
@@ -159,3 +246,4 @@ el('exportBtn').onclick=async()=>{
   }catch(e){toast(e.message,true)}
 };
 refresh();
+resumeLatestBatch();
