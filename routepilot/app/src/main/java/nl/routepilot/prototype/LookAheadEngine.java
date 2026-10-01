@@ -66,6 +66,33 @@ public final class LookAheadEngine {
             }
         }
 
+        if (route.bridgeEvents != null) {
+            for (BridgeOpeningService.Event e : route.bridgeEvents) {
+                int idx = e.routeIndex >= 0 ? e.routeIndex
+                        : OnlineServices.closestRoutePointIndex(e.lat, e.lon, route.points);
+                double ahead = distanceAlong(route.points, currentIndex, idx);
+                if (ahead < 0 || ahead > horizonMeters) continue;
+                Item i = new Item();
+                i.priority = 90;
+                i.aheadMeters = ahead;
+                i.text = "BRUGOPENING: " + e.description;
+                out.items.add(i);
+            }
+        }
+
+        if (route.temporarySpeeds != null) {
+            for (TemporarySpeedService.Limit l : route.temporarySpeeds) {
+                int idx = l.routeIndex;
+                double ahead = distanceAlong(route.points, currentIndex, idx);
+                if (ahead < 0 || ahead > horizonMeters) continue;
+                Item i = new Item();
+                i.priority = 45;
+                i.aheadMeters = ahead;
+                i.text = "TIJDELIJK MAX " + l.kmh + " km/u";
+                out.items.add(i);
+            }
+        }
+
         Item top = null;
         for (Item i : out.items) {
             if (top == null
