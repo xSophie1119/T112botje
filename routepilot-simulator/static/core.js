@@ -1,4 +1,4 @@
-const state={scenarios:[],corrections:[],driverTrips:[],selected:null,selectedDriver:null,altIndex:0,routeLayer:null,altLayers:[],endpointLayers:[],correctionLayer:null,picked:null,correctionMode:false,showCorrections:true,token:localStorage.getItem('routepilot_token')||''};
+const state={scenarios:[],corrections:[],driverTrips:[],selected:null,selectedDriver:null,altIndex:0,routeLayer:null,altLayers:[],endpointLayers:[],correctionLayer:null,picked:null,correctionMode:false,showCorrections:true,routeEditMode:false,routeEdit:{markers:[],endpointMarker:null,previewLayer:null,originalLayer:null,originalGeometry:[],originalEndpoint:null,previewGeometry:[],timer:null,seq:0},token:localStorage.getItem('routepilot_token')||''};
 const el=id=>document.getElementById(id);
 const map=L.map('map',{zoomControl:true}).setView([51.5555,5.0913],12.5);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
@@ -14,6 +14,12 @@ async function api(url,opts={}){
   if(r.status===401)throw new Error('Token vereist of onjuist. Klik bovenaan op Token.');
   if(!r.ok){const x=await r.json().catch(()=>({}));throw new Error(x.error||('HTTP '+r.status));}
   return r.json();
+}
+function distanceM(a,b){
+  const R=6371000,rad=x=>x*Math.PI/180;
+  const p1=rad(a.lat),p2=rad(b.lat),dp=rad(b.lat-a.lat),dl=rad(b.lng-a.lng);
+  const h=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*R*Math.asin(Math.min(1,Math.sqrt(h)));
 }
 function km(m){return(m/1000).toFixed(1)+' km'}
 function mins(s){const m=Math.round(s/60);return m<60?m+' min':Math.floor(m/60)+'u '+(m%60)+'m'}
