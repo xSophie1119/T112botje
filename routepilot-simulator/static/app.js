@@ -9,6 +9,10 @@ async function openScenario(id){
     el('detailDuration').textContent=mins(x.duration_s);
     el('detailHits').textContent=x.correction_hits;
     el('detailScore').textContent=Math.round(x.score);
+    el('detailTarget').textContent=x.destination_name||'—';
+    el('detailStop').textContent=(x.destination_stop_name||'route-stoppunt')
+      +' · '+Number(x.destination_lat||0).toFixed(6)+', '+Number(x.destination_lon||0).toFixed(6);
+    el('detailStopGap').textContent=Math.round(Number(x.destination_target_to_stop_m||0))+' m';
     el('reviewNote').value=x.review_note||'';
     renderAlternatives();drawSelectedAlternative(0,true);renderScenarios();
   }catch(e){toast(e.message,true)}
@@ -38,7 +42,35 @@ function drawSelectedAlternative(index,fit=false){
   if(latlng.length){
     state.routeLayer=L.polyline(latlng,{color:'#38bdf8',weight:7,opacity:.92,lineCap:'round'}).addTo(map);
     state.routeLayer.on('click',ev=>{if(state.correctionMode)pickLocation(ev.latlng)});
-    if(fit)map.fitBounds(state.routeLayer.getBounds(),{padding:[45,45]});
+
+    const targetLat=Number(x.destination_target_lat||0),targetLon=Number(x.destination_target_lon||0);
+    const stopLat=Number(x.destination_lat||0),stopLon=Number(x.destination_lon||0);
+    if(targetLat&&targetLon){
+      const target=L.circleMarker([targetLat,targetLon],{
+        radius:9,color:'#a855f7',fillColor:'#a855f7',fillOpacity:1,weight:3
+      }).bindPopup('<b>Echte doellocatie</b><br>'+esc(x.destination_name||'')+
+        '<br>'+targetLat.toFixed(6)+', '+targetLon.toFixed(6)).addTo(map);
+      state.endpointLayers.push(target);
+    }
+    if(stopLat&&stopLon){
+      const stop=L.circleMarker([stopLat,stopLon],{
+        radius:9,color:'#22c55e',fillColor:'#22c55e',fillOpacity:1,weight:3
+      }).bindPopup('<b>Werkelijk route-eindpunt</b><br>'+esc(x.destination_stop_name||'route-stoppunt')+
+        '<br>'+Math.round(Number(x.destination_target_to_stop_m||0))+' m van doel').addTo(map);
+      state.endpointLayers.push(stop);
+    }
+    if(targetLat&&targetLon&&stopLat&&stopLon){
+      const connector=L.polyline([[targetLat,targetLon],[stopLat,stopLon]],{
+        color:'#c084fc',weight:3,opacity:.85,dashArray:'4 7'
+      }).addTo(map);
+      state.endpointLayers.push(connector);
+    }
+
+    if(fit){
+      const layers=[state.routeLayer,...state.endpointLayers];
+      const group=L.featureGroup(layers);
+      map.fitBounds(group.getBounds(),{padding:[45,45]});
+    }
   }
 }
 function pickLocation(latlng){
