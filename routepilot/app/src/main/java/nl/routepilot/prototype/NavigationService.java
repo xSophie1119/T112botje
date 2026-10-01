@@ -30,6 +30,8 @@ public class NavigationService extends Service implements LocationListener, Text
     private final Handler handler=new Handler(Looper.getMainLooper());
     private long lastBackgroundRerouteMs=0L;
     private int backgroundStepIndex=0;
+    private final NavigationMapMatcher.State mapMatchState=new NavigationMapMatcher.State();
+    private final ArrivalDetector.State arrivalDetectorState=new ArrivalDetector.State();
 
     @Override public void onCreate(){
         super.onCreate();
@@ -77,11 +79,15 @@ public class NavigationService extends Service implements LocationListener, Text
         List<GeoPoint> route=RoutePilotState.loadRoute(this);
         if(route.size()<2)return;
 
-        int routeIndex=OnlineServices.closestRoutePointIndex(
-                location.getLatitude(),location.getLongitude(),route);
+        NavigationMapMatcher.Match matched=
+                NavigationMapMatcher.match(location,route,mapMatchState);
+        int routeIndex=matched.index>=0?matched.index:
+                OnlineServices.closestRoutePointIndex(
+                        location.getLatitude(),location.getLongitude(),route);
         double remaining=OnlineServices.remainingRouteDistanceMeters(Math.max(0,routeIndex),route);
-        double offRoute=OnlineServices.distanceFromRouteMeters(
-                location.getLatitude(),location.getLongitude(),route);
+        double offRoute=matched.index>=0?matched.distanceM:
+                OnlineServices.distanceFromRouteMeters(
+                        location.getLatitude(),location.getLongitude(),route);
 
         double remainingSeconds=s.planDistanceM>1.0
                 ? s.planDurationS*(remaining/s.planDistanceM):0.0;
@@ -111,7 +117,10 @@ public class NavigationService extends Service implements LocationListener, Text
         if(s.destLat!=0.0 || s.destLon!=0.0){
             double toDestination=OnlineServices.distanceMeters(
                     location.getLatitude(),location.getLongitude(),s.destLat,s.destLon);
-            if(toDestination<35.0){
+            double speedKmh=location.hasSpeed()?Math.max(0.0,location.getSpeed()*3.6):0.0;
+            double accuracy=location.hasAccuracy()?location.getAccuracy():35.0;
+            if(ArrivalDetector.update(arrivalDetectorState,System.currentTimeMillis(),
+                    toDestination,remaining,offRoute,speedKmh,accuracy)){
                 handleBackgroundArrival();
                 return;
             }
@@ -138,6 +147,8 @@ public class NavigationService extends Service implements LocationListener, Text
                 RoutePilotState.savePlan(NavigationService.this,p.route,destination);
                 RoutePilotStore.savePlannedRoute(NavigationService.this,p.route.points);
                 backgroundStepIndex=0;
+                mapMatchState.reset();
+                arrivalDetectorState.reset();
                 RoutePilotState.update(NavigationService.this,true,
                         "Nieuwe route geladen","",
                         0,p.route.distanceMeters,
