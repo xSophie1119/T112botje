@@ -71,6 +71,22 @@ CREATE TABLE IF NOT EXISTS route_cache (
     response_json TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS driver_trips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id TEXT NOT NULL UNIQUE,
+    destination TEXT NOT NULL DEFAULT '',
+    started_at INTEGER NOT NULL DEFAULT 0,
+    ended_at INTEGER NOT NULL DEFAULT 0,
+    planned_distance_m REAL NOT NULL DEFAULT 0,
+    actual_distance_m REAL NOT NULL DEFAULT 0,
+    warnings INTEGER NOT NULL DEFAULT 0,
+    reroutes INTEGER NOT NULL DEFAULT 0,
+    planned_json TEXT NOT NULL DEFAULT '[]',
+    actual_json TEXT NOT NULL DEFAULT '[]',
+    review_status TEXT NOT NULL DEFAULT 'new',
+    review_note TEXT NOT NULL DEFAULT '',
+    uploaded_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS scenarios (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id TEXT NOT NULL,
@@ -254,7 +270,7 @@ def simulate_batch(count, seed):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.2"
+    server_version = "RoutePilotSimulator/3.3"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -288,10 +304,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.2", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.3", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/corrections" or path == "/api/corrections/export":
             return self.send_json({"version": 1, "generated_at": now_ms(), "corrections": active_corrections()})
+
+        if path == "/api/driver-trips":
+            q = urllib.parse.parse_qs(parsed.query)
+            limit = max(1, min(200, int(q.get("limit", ["50"])[0])))
+            with db_lock, db() as con:
+                rows = con.execute(
+                    "SELECT * FROM driver_trips ORDER BY uploaded_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["planned_points"] = json.loads(d.pop("planned_json"))
+                d["actual_points"] = json.loads(d.pop("actual_json"))
+                out.append(d)
+            return self.send_json({"driver_trips": out})
 
         if path == "/api/scenarios":
             q = urllib.parse.parse_qs(parsed.query)
@@ -313,9 +344,10 @@ class Handler(BaseHTTPRequestHandler):
                 rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE status='rejected'").fetchone()[0]
                 errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE status='error'").fetchone()[0]
                 corrections = con.execute("SELECT COUNT(*) FROM corrections WHERE active=1").fetchone()[0]
+                driver_trips = con.execute("SELECT COUNT(*) FROM driver_trips").fetchone()[0]
             return self.send_json({
                 "total": total, "accepted": accepted, "rejected": rejected,
-                "errors": errors, "corrections": corrections
+                "errors": errors, "corrections": corrections, "driver_trips": driver_trips
             })
 
         if path.startswith("/api/scenarios/"):
@@ -343,6 +375,43 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
         except Exception as exc:
             return self.send_json({"error": str(exc)}, 400)
+
+        if path == "/api/driver-trips":
+            trip_id = str(payload.get("trip_id", "")).strip()[:120]
+            if not trip_id:
+                return self.send_json({"error": "trip_id ontbreekt"}, 400)
+            destination = str(payload.get("destination", ""))[:300]
+            planned = payload.get("planned_points") or []
+            actual = payload.get("actual_points") or []
+            if not isinstance(planned, list) or not isinstance(actual, list):
+                return self.send_json({"error": "ongeldige trackdata"}, 400)
+            if len(planned) > 2500 or len(actual) > 2500:
+                return self.send_json({"error": "trackdata te groot"}, 400)
+            with db_lock, db() as con:
+                con.execute(
+                    """INSERT INTO driver_trips(
+                    trip_id,destination,started_at,ended_at,planned_distance_m,actual_distance_m,
+                    warnings,reroutes,planned_json,actual_json,review_status,review_note,uploaded_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?, 'new','',?)
+                    ON CONFLICT(trip_id) DO UPDATE SET
+                    destination=excluded.destination,started_at=excluded.started_at,
+                    ended_at=excluded.ended_at,planned_distance_m=excluded.planned_distance_m,
+                    actual_distance_m=excluded.actual_distance_m,warnings=excluded.warnings,
+                    reroutes=excluded.reroutes,planned_json=excluded.planned_json,
+                    actual_json=excluded.actual_json,uploaded_at=excluded.uploaded_at""",
+                    (
+                        trip_id, destination, int(payload.get("started_at", 0) or 0),
+                        int(payload.get("ended_at", 0) or 0),
+                        float(payload.get("planned_distance_m", 0) or 0),
+                        float(payload.get("actual_distance_m", 0) or 0),
+                        int(payload.get("warnings", 0) or 0),
+                        int(payload.get("reroutes", 0) or 0),
+                        json.dumps(planned, separators=(",", ":")),
+                        json.dumps(actual, separators=(",", ":")),
+                        now_ms(),
+                    ),
+                )
+            return self.send_json({"ok": True, "trip_id": trip_id}, 201)
 
         if path == "/api/simulate":
             count = payload.get("count", 25)
@@ -432,7 +501,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.2 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.3 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
