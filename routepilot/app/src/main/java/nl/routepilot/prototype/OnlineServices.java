@@ -23,7 +23,7 @@ import java.util.Set;
 public final class OnlineServices {
 
     public static final String USER_AGENT =
-            "RoutePilot/2.0-debug (personal Android prototype; https://github.com/xSophie1119)";
+            "RoutePilot/3.1-debug (WMO navigation prototype; https://github.com/xSophie1119)";
 
     private static final Locale NL = new Locale("nl", "NL");
 
@@ -34,6 +34,36 @@ public final class OnlineServices {
                     return size() > 50;
                 }
             };
+
+    private static final long ROUTE_CACHE_MS = 20_000L;
+    private static final long RESTRICTION_CACHE_MS = 90_000L;
+
+    private static final Map<String, TimedText> ROUTE_RESPONSE_CACHE =
+            new LinkedHashMap<String, TimedText>(12, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<String, TimedText> eldest) {
+                    return size() > 12;
+                }
+            };
+
+    private static final Map<String, TimedRestrictions> RESTRICTION_CACHE =
+            new LinkedHashMap<String, TimedRestrictions>(20, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        Map.Entry<String, TimedRestrictions> eldest) {
+                    return size() > 20;
+                }
+            };
+
+    private static final class TimedText {
+        final long at; final String body;
+        TimedText(long at,String body){this.at=at;this.body=body;}
+    }
+
+    private static final class TimedRestrictions {
+        final long at; final List<Restriction> items;
+        TimedRestrictions(long at,List<Restriction> items){
+            this.at=at;this.items=new ArrayList<>(items);
+        }
+    }
 
     private static long lastNominatimRequestMs = 0L;
 
@@ -189,7 +219,23 @@ public final class OnlineServices {
                         + "?overview=full&geometries=geojson&steps=true&alternatives=true",
                 fromLon, fromLat, toLon, toLat);
 
-        JSONObject root = new JSONObject(get(url, 22000));
+        String routeKey = String.format(Locale.US, "%.4f,%.4f>%.5f,%.5f",
+                fromLat, fromLon, toLat, toLon);
+        String body = null;
+        synchronized (ROUTE_RESPONSE_CACHE) {
+            TimedText hit = ROUTE_RESPONSE_CACHE.get(routeKey);
+            if (hit != null && System.currentTimeMillis() - hit.at < ROUTE_CACHE_MS)
+                body = hit.body;
+        }
+        if (body == null) {
+            body = get(url, 22000);
+            synchronized (ROUTE_RESPONSE_CACHE) {
+                ROUTE_RESPONSE_CACHE.put(routeKey,
+                        new TimedText(System.currentTimeMillis(), body));
+            }
+        }
+
+        JSONObject root = new JSONObject(body);
         if (!"Ok".equalsIgnoreCase(root.optString("code"))) {
             throw new IllegalArgumentException("Geen autoroute gevonden.");
         }
@@ -308,6 +354,13 @@ public final class OnlineServices {
         List<Restriction> out = new ArrayList<>();
         if (route == null || route.points.size() < 2) return out;
 
+        String restrictionKey = restrictionCacheKey(route, vehicle);
+        synchronized (RESTRICTION_CACHE) {
+            TimedRestrictions hit = RESTRICTION_CACHE.get(restrictionKey);
+            if (hit != null && System.currentTimeMillis() - hit.at < RESTRICTION_CACHE_MS)
+                return new ArrayList<>(hit.items);
+        }
+
         String line = buildOverpassLine(route.points);
         if (line.isEmpty()) return out;
 
@@ -409,7 +462,26 @@ public final class OnlineServices {
             addNarrowRoadSignal(out, seen, lat, lon, tags, route.points);
         }
 
-        return out;
+        synchronized (RESTRICTION_CACHE) {
+            RESTRICTION_CACHE.put(restrictionKey,
+                    new TimedRestrictions(System.currentTimeMillis(), out));
+        }
+        return new ArrayList<>(out);
+    }
+
+    private static String restrictionCacheKey(RouteResult route, VehicleProfile vehicle) {
+        int n = route.points.size();
+        GeoPoint a = route.points.get(0);
+        GeoPoint m = route.points.get(n / 2);
+        GeoPoint z = route.points.get(n - 1);
+        return String.format(Locale.US,
+                "%.4f,%.4f|%.4f,%.4f|%.4f,%.4f|%.0f|%.2f,%.2f,%.2f,%.2f,%b",
+                a.getLatitude(), a.getLongitude(),
+                m.getLatitude(), m.getLongitude(),
+                z.getLatitude(), z.getLongitude(),
+                route.distanceMeters / 100.0,
+                vehicle.lengthM, vehicle.widthM, vehicle.heightM, vehicle.maxWeightT,
+                vehicle.busLaneExemption);
     }
 
     private static void addNarrowRoadSignal(List<Restriction> out, Set<String> seen,
