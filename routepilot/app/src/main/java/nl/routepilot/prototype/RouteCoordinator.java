@@ -10,6 +10,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public final class RouteCoordinator {
     private static final ExecutorService SCAN_POOL = Executors.newFixedThreadPool(7);
@@ -131,6 +132,8 @@ public final class RouteCoordinator {
                                    DestinationAccessService.Result sharedAccess) {
         Prepared p=new Prepared();
         p.route=route;
+        final long scanDeadline=System.currentTimeMillis()
+                +(route.providerVehicleAware?9_000L:12_000L);
 
         CompletableFuture<List<OnlineServices.Restriction>> restrictions=
                 async(() -> OnlineServices.scanRestrictions(context,route,vehicle));
@@ -150,22 +153,34 @@ public final class RouteCoordinator {
                         ? CompletableFuture.completedFuture(sharedAccess)
                         : async(() -> DestinationAccessService.scan(destination,route.points));
 
-        try{route.restrictions=restrictions.get();}
-        catch(Exception e){p.vehicleScanOk=false;route.restrictions=new ArrayList<>();}
+        try{route.restrictions=await(restrictions,scanDeadline);}
+        catch(Exception e){
+            restrictions.cancel(true);
+            p.vehicleScanOk=false;route.restrictions=new ArrayList<>();
+        }
 
-        try{route.trafficEvents=traffic.get();}
-        catch(Exception e){p.trafficScanOk=false;route.trafficEvents=new ArrayList<>();}
+        try{route.trafficEvents=await(traffic,scanDeadline);}
+        catch(Exception e){
+            traffic.cancel(true);
+            p.trafficScanOk=false;route.trafficEvents=new ArrayList<>();
+        }
 
         try{
-            route.roadSigns=signs.get();
+            route.roadSigns=await(signs,scanDeadline);
             applyFormalSignRestrictions(route,vehicle);
-        }catch(Exception e){p.signScanOk=false;route.roadSigns=new ArrayList<>();}
+        }catch(Exception e){
+            signs.cancel(true);
+            p.signScanOk=false;route.roadSigns=new ArrayList<>();
+        }
 
-        try{route.bridgeEvents=bridges.get();}
-        catch(Exception ignored){route.bridgeEvents=new ArrayList<>();}
+        try{route.bridgeEvents=await(bridges,scanDeadline);}
+        catch(Exception ignored){
+            bridges.cancel(true);
+            route.bridgeEvents=new ArrayList<>();
+        }
 
         try{
-            NdwAccessibilityService.Result n=ndwAccessibility.get();
+            NdwAccessibilityService.Result n=await(ndwAccessibility,scanDeadline);
             if(n!=null){
                 route.ndwAccessibilityChecked=n.checked;
                 route.ndwAccessibilityHardHits=n.restrictions.size();
@@ -173,6 +188,7 @@ public final class RouteCoordinator {
                 route.restrictions.addAll(n.restrictions);
             }
         }catch(Exception ignored){
+            ndwAccessibility.cancel(true);
             route.ndwAccessibilityChecked=false;
         }
 
@@ -180,8 +196,11 @@ public final class RouteCoordinator {
         route.temporarySpeeds=new ArrayList<>();
         hydrateDrivingDataAsync(route);
 
-        try{p.destinationAccess=access.get();}
-        catch(Exception ignored){p.destinationAccess=new DestinationAccessService.Result();}
+        try{p.destinationAccess=await(access,scanDeadline);}
+        catch(Exception ignored){
+            access.cancel(true);
+            p.destinationAccess=new DestinationAccessService.Result();
+        }
 
         p.analysis=RouteAnalysis.analyze(context,route,destination);
         p.confidence=RouteConfidence.calculate(context,p,destination);
@@ -198,6 +217,11 @@ public final class RouteCoordinator {
             try{route.temporarySpeeds=TemporarySpeedService.limitsForRoute(route.points);}
             catch(Exception ignored){route.temporarySpeeds=new ArrayList<>();}
         });
+    }
+
+    private static <T> T await(CompletableFuture<T> future,long deadlineMs)throws Exception{
+        long remaining=Math.max(1L,deadlineMs-System.currentTimeMillis());
+        return future.get(remaining,TimeUnit.MILLISECONDS);
     }
 
     private static <T> CompletableFuture<T> async(Callable<T> task){
