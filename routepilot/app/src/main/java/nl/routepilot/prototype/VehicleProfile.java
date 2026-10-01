@@ -9,6 +9,8 @@ public class VehicleProfile {
     public double widthM = 2.34;
     public double maxWeightT = 3.50;
     public boolean rearLift = true;
+    // Conservatieve vrije ruimte achter de bus die RoutePilot voor liftgebruik probeert te bewaken.
+    public double rearLiftClearanceM = 2.00;
     public boolean busLaneExemption = true;
 
     private static final String PREFS = "routepilot_vehicle";
@@ -21,6 +23,7 @@ public class VehicleProfile {
         p.widthM = readDouble(sp, "widthM", 2.34);
         p.maxWeightT = readDouble(sp, "maxWeightT", 3.50);
         p.rearLift = sp.getBoolean("rearLift", true);
+        p.rearLiftClearanceM = readDouble(sp, "rearLiftClearanceM", 2.00);
         p.busLaneExemption = sp.getBoolean("busLaneExemption", true);
         return p;
     }
@@ -33,6 +36,7 @@ public class VehicleProfile {
                 .putLong("widthM", Double.doubleToRawLongBits(widthM))
                 .putLong("maxWeightT", Double.doubleToRawLongBits(maxWeightT))
                 .putBoolean("rearLift", rearLift)
+                .putLong("rearLiftClearanceM", Double.doubleToRawLongBits(rearLiftClearanceM))
                 .putBoolean("busLaneExemption", busLaneExemption)
                 .apply();
     }
