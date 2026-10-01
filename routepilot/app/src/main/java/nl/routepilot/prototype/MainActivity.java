@@ -1177,31 +1177,54 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         p.visits++;
         RoutePilotStore.saveProfile(this, p);
 
+        WmoSessionManager.Snapshot wmo = WmoSessionManager.get(this);
+        WmoSessionManager.Phase phase = wmo.phase;
+
         speak("Bestemming bereikt.");
-        stopNavigation(true);
+        stopNavigation(false);
 
-        String side = currentAnalysis.destinationOnRight
-                ? "✓ Rechterdeur aan de ingangzijde gebruikt."
-                : "Rechterdeurvoorkeur is hier niet toegepast omdat de normale/legale aanrijrichting leidend is.";
+        if (phase == WmoSessionManager.Phase.TO_PICKUP
+                || phase == WmoSessionManager.Phase.IDLE) {
+            WmoSessionManager.arrivePickup(this);
+            waitMinuteAnnounced = false;
+            waitExpiredAnnounced = false;
+            updateWmoPanel();
+            searchArea.setVisibility(View.GONE);
+            savedPlaces.setVisibility(View.GONE);
+            previewArea.setVisibility(View.GONE);
+            wmoArea.setVisibility(View.VISIBLE);
 
-        String lift = vehicle.rearLift
-                ? "\n\nAchterlift:\n• Houd voldoende vrije ruimte achter de bus."
-                + "\n• Controleer fietspad, paaltjes, stoeprand en verkeer."
-                + "\n• Zet de bus volledig veilig stil vóór bediening."
-                : "";
+            String arrival = currentArrival == null
+                    ? "Controleer veilige stopplek, deurzijde en achterlift."
+                    : currentArrival.summary();
+            arrivalText.setText("OPHAALPUNT\n" + arrival);
+            speak("Aangekomen bij de cliënt. De wachttijd van drie minuten is gestart.");
+            return;
+        }
 
-        final RoutePilotStore.LocationProfile saved = p;
-        new AlertDialog.Builder(this)
-                .setTitle("Bestemming bereikt")
-                .setMessage(side + lift)
-                .setNeutralButton("Aanrijzijde opslaan", (d, w) -> {
-                    saved.preferredArrivalBearing = currentAnalysis.approachBearing;
-                    saved.rightDoorToEntrance = true;
-                    RoutePilotStore.saveProfile(this, saved);
-                    Toast.makeText(this, "Aanrijzijde opgeslagen voor volgende rit.", Toast.LENGTH_SHORT).show();
-                })
-                .setPositiveButton("Klaar", null)
-                .show();
+        if (phase == WmoSessionManager.Phase.TO_DROPOFF
+                || phase == WmoSessionManager.Phase.PASSENGER_ONBOARD) {
+            WmoSessionManager.arriveDropoff(this);
+            updateWmoPanel();
+            searchArea.setVisibility(View.GONE);
+            savedPlaces.setVisibility(View.GONE);
+            previewArea.setVisibility(View.GONE);
+
+            String arrival = currentArrival == null
+                    ? "Controleer uitstapplek en achterlift."
+                    : currentArrival.summary();
+
+            new AlertDialog.Builder(this)
+                    .setTitle("Brengbestemming bereikt")
+                    .setMessage(arrival
+                            + "\n\nMaak eerst het uitstappen en de lift veilig af; zet daarna de rit op gereed.")
+                    .setPositiveButton("Rit gereed", (d, w) -> completeWmoTrip())
+                    .setNeutralButton("Locatieprofiel", (d, w) -> showLocationProfileDialog())
+                    .show();
+            return;
+        }
+
+        updateWmoPanel();
     }
 
     private void stopNavigation(boolean keepRoute) {
@@ -1218,8 +1241,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         navArea.setVisibility(View.GONE);
         searchArea.setVisibility(View.VISIBLE);
         savedPlaces.setVisibility(View.VISIBLE);
-        previewArea.setVisibility(keepRoute && currentRoute != null ? View.VISIBLE
-                : currentRoute == null ? View.GONE : View.VISIBLE);
+        previewArea.setVisibility(keepRoute && currentRoute != null ? View.VISIBLE : View.GONE);
         navStatus.setText("NAVIGATIE ACTIEF");
     }
 
