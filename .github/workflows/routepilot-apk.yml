@@ -79,7 +79,25 @@ jobs:
           spec = importlib.util.spec_from_file_location('rp_sim', p)
           mod = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(mod)
-          assert len(mod.ANCHORS) >= 20
+          assert len(mod.ANCHORS) >= 30
+          assert len(mod.INNER_MUNICIPALITIES) == 8
+          q = mod.quota_plan(25)
+          assert q.count('hospital') >= 5
+          assert q.count('care') >= 5
+          assert len(q) == 25
+
+          inside={'name':'A','lat':51.55,'lon':5.09,'zone':'inside','municipality':'Tilburg','category':'general'}
+          outside={'name':'B','lat':51.60,'lon':4.80,'zone':'outside','municipality':'Breda','category':'general'}
+          outside2={'name':'C','lat':51.64,'lon':4.86,'zone':'outside','municipality':'Oosterhout','category':'general'}
+          assert mod.validate_regio_trip(inside,outside,24000)[0] is True
+          assert mod.validate_regio_trip(outside,inside,24000)[0] is True
+          assert mod.validate_regio_trip(outside,outside2,10000)[0] is False
+          assert mod.validate_regio_trip(inside,outside,26000)[0] is False
+
+          goirle={'name':'Goirle','lat':51.52,'lon':5.06,'zone':'inside','municipality':'Goirle','category':'general'}
+          etz={'name':'ETZ Waalwijk','lat':51.68,'lon':5.07,'zone':'inside','municipality':'Waalwijk','category':'hospital'}
+          assert mod.validate_regio_trip(goirle,etz,32000)[0] is True
+
           assert mod.route_score({'distance': 1000, 'duration': 100, 'geometry': {'coordinates': [[5.09,51.55],[5.10,51.56]]}}, [])[0] > 0
           batch = mod.create_batch(1, 12345)
           snap = mod._batch_snapshot(batch)
@@ -105,15 +123,23 @@ jobs:
           print(status)
           assert status['pdok']['ok'], status['pdok']
           assert status['osrm']['ok'], status['osrm']
-          locations = mod.build_training_location_pool(random.Random(32026), 2)
-          assert len(locations) >= 2
-          a = locations[0]
-          b = next(x for x in locations[1:] if mod.haversine_m(a[1],a[2],x[1],x[2]) > 700)
-          route = mod.cached_osrm_route(a[1],a[2],b[1],b[2])
+          pools = mod.build_training_pools(random.Random(32026), 25)
+          assert len(pools['general']) >= 40
+          assert len(pools['hospital']) >= 5
+          assert len(pools['care']) >= 5
+          assert pools['inside']
+          assert pools['outside']
+          print('POOLS:', len(pools['general']), 'general,', len(pools['hospital']), 'hospital,', len(pools['care']), 'care')
+
+          # Eén echte binnen->buiten route als ketentest.
+          a = pools['inside'][0]
+          candidates = [x for x in pools['outside'] if mod.haversine_m(a['lat'],a['lon'],x['lat'],x['lon']) > 700]
+          b = candidates[0]
+          route = mod.cached_osrm_route(a['lat'],a['lon'],b['lat'],b['lon'])
           assert route.get('code') == 'Ok'
           assert len(route.get('waypoints') or []) == 2
           assert route.get('routes')
-          print('LIVE OK:', a[0], '->', b[0], round(route['routes'][0]['distance']), 'm')
+          print('LIVE OK:', a['name'], '->', b['name'], round(route['routes'][0]['distance']), 'm')
           PY
 
 
@@ -127,12 +153,12 @@ jobs:
         run: |
           test -f routepilot-simulator/START_SIMULATOR_LAN.bat
           test -f routepilot-simulator/server.py
-          mkdir -p RoutePilot-V3.4.0-PC
-          cp -R routepilot-simulator/* RoutePilot-V3.4.0-PC/
+          mkdir -p RoutePilot-V3.5.0-PC
+          cp -R routepilot-simulator/* RoutePilot-V3.5.0-PC/
 
       - name: Upload Windows simulator package
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V3.4.0-PC-Simulator
-          path: RoutePilot-V3.4.0-PC
+          name: RoutePilot-V3.5.0-PC-Simulator
+          path: RoutePilot-V3.5.0-PC
           if-no-files-found: error
