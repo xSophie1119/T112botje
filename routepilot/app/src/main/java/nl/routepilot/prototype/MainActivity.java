@@ -226,7 +226,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         locationMarker.setPosition(point);
 
         int accuracy = Math.round(location.getAccuracy());
-        gpsStatus.setText(String.format(Locale.NL,
+        gpsStatus.setText(String.format(new Locale("nl", "NL"),
                 "GPS actief • nauwkeurigheid ±%d m", accuracy));
 
         if (!centeredOnce) {
@@ -335,13 +335,13 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         double km = route.distanceMeters / 1000.0;
         int minutes = (int) Math.round(route.durationSeconds / 60.0);
-        routeTitle.setText(String.format(Locale.NL, "%.1f km • %d min", km, minutes));
+        routeTitle.setText(String.format(new Locale("nl", "NL"), "%.1f km • %d min", km, minutes));
         routeMeta.setText(route.firstInstruction + "  •  " + shortLabel(destination.label));
 
         fitRoute(route.points);
         warningText.setText("Voertuigscan loopt…");
 
-        speak(String.format(Locale.NL,
+        speak(String.format(new Locale("nl", "NL"),
                 "Route gevonden. %.1f kilometer, ongeveer %d minuten. %s",
                 km, minutes, route.firstInstruction));
     }
