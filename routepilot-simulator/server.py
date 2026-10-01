@@ -268,6 +268,7 @@ def haversine_m(a_lat, a_lon, b_lat, b_lon):
 
 
 PDOK_FREE="https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"
+OVERPASS_URL="https://overpass-api.de/api/interpreter"
 TRAINING_LOCATION_TTL_MS=30*24*3600*1000
 _training_location_cache={}
 _training_location_lock=threading.Lock()
@@ -285,20 +286,26 @@ def _parse_wkt_point(value):
     except Exception:
         return None
 
-def _cached_training_locations(area_name):
+def _cached_training_locations(area_name,category=None):
     cutoff=now_ms()-TRAINING_LOCATION_TTL_MS
+    where="area_name=?"
+    args=[area_name]
+    if category:
+        where+=" AND category=?"
+        args.append(category)
     with db_lock,db() as con:
         fresh=con.execute(
-            "SELECT name,lat,lon,source,area_name FROM training_locations "
-            "WHERE area_name=? AND created_at>=? ORDER BY name LIMIT 80",
-            (area_name,cutoff)
+            "SELECT name,lat,lon,source,area_name,municipality,zone,category "
+            "FROM training_locations WHERE "+where+" AND created_at>=? "
+            "ORDER BY name LIMIT 150",
+            tuple(args+[cutoff])
         ).fetchall()
         if fresh:
             return [dict(r) for r in fresh]
         stale=con.execute(
-            "SELECT name,lat,lon,source,area_name FROM training_locations "
-            "WHERE area_name=? ORDER BY created_at DESC LIMIT 80",
-            (area_name,)
+            "SELECT name,lat,lon,source,area_name,municipality,zone,category "
+            "FROM training_locations WHERE "+where+" ORDER BY created_at DESC LIMIT 150",
+            tuple(args)
         ).fetchall()
     return [dict(r) for r in stale]
 
@@ -308,51 +315,55 @@ def _store_training_locations(area_name,items):
     stamp=now_ms()
     with db_lock,db() as con:
         for item in items:
-            key_raw=f"{item['name']}|{item['lat']:.6f}|{item['lon']:.6f}"
+            key_raw=(
+                f"{item['name']}|{item['lat']:.6f}|{item['lon']:.6f}|"
+                f"{item.get('category','general')}"
+            )
             key=hashlib.sha256(key_raw.encode()).hexdigest()
             con.execute(
                 "INSERT OR REPLACE INTO training_locations("
-                "cache_key,name,lat,lon,source,area_name,created_at"
-                ") VALUES(?,?,?,?,?,?,?)",
-                (key,item["name"],item["lat"],item["lon"],
-                 item.get("source","PDOK"),area_name,stamp)
+                "cache_key,name,lat,lon,source,area_name,municipality,zone,category,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    key,item["name"],item["lat"],item["lon"],
+                    item.get("source","PDOK"),area_name,
+                    item.get("municipality",""),item.get("zone",""),
+                    item.get("category","general"),stamp
+                )
             )
 
 def discover_training_locations(anchor):
-    area_name,lat,lon=anchor
-    key=(area_name,round(lat,4),round(lon,4))
+    area_name,lat,lon,expected_municipality,zone=anchor
+    key=(area_name,round(lat,4),round(lon,4),expected_municipality,zone)
     with _training_location_lock:
         cached=_training_location_cache.get(key)
     if cached is not None:
         return list(cached)
 
-    disk=_cached_training_locations(area_name)
+    disk=_cached_training_locations(area_name,"general")
     fresh_cutoff=now_ms()-TRAINING_LOCATION_TTL_MS
-    # Als er genoeg verse cache is, geen netwerkcall nodig.
     with db_lock,db() as con:
         fresh_count=con.execute(
-            "SELECT COUNT(*) FROM training_locations WHERE area_name=? AND created_at>=?",
+            "SELECT COUNT(*) FROM training_locations "
+            "WHERE area_name=? AND category='general' AND created_at>=?",
             (area_name,fresh_cutoff)
         ).fetchone()[0]
-    if fresh_count>=12 and disk:
-        result=[{"name":r["name"],"lat":r["lat"],"lon":r["lon"],
-                 "area":area_name,"source":r["source"]} for r in disk]
+    if fresh_count>=16 and disk:
         with _training_location_lock:
-            _training_location_cache[key]=list(result)
-        return result
+            _training_location_cache[key]=list(disk)
+        return list(disk)
 
     params={
         "q":"*:*",
-        "rows":"70",
+        "rows":"100",
         "lat":f"{lat:.7f}",
         "lon":f"{lon:.7f}",
         "fq":"type:adres",
         "fl":"weergavenaam,centroide_ll,type,gemeentenaam",
         "wt":"json",
     }
-    url=PDOK_FREE+"?"+urllib.parse.urlencode(params)
     req=urllib.request.Request(
-        url,
+        PDOK_FREE+"?"+urllib.parse.urlencode(params),
         headers={"User-Agent":USER_AGENT,"Accept":"application/json"},
     )
 
@@ -365,72 +376,237 @@ def discover_training_locations(anchor):
         for doc in docs:
             point=_parse_wkt_point(doc.get("centroide_ll"))
             name=str(doc.get("weergavenaam","") or "").strip()
+            municipality=str(doc.get("gemeentenaam","") or "").strip()
             if not point or not name:
+                continue
+            if municipality and municipality.lower()!=expected_municipality.lower():
                 continue
             la,lo=point
             dist=haversine_m(lat,lon,la,lo)
-            if dist>1800.0:
+            if dist>2400.0:
                 continue
             k=(name.lower(),round(la,6),round(lo,6))
             if k in seen:
                 continue
             seen.add(k)
             found.append({
-                "name":name,
-                "lat":la,
-                "lon":lo,
-                "area":area_name,
-                "source":"PDOK/BAG",
+                "name":name,"lat":la,"lon":lo,
+                "area":area_name,"source":"PDOK/BAG",
                 "distance_m":dist,
+                "municipality":expected_municipality,
+                "zone":zone,
+                "category":"general",
             })
+        # Niet steeds de eerste straat rond een seed pakken: verdeel over
+        # afstandsringen en sorteer pas daarna.
         found.sort(key=lambda x:x["distance_m"])
-        found=found[:50]
-        _store_training_locations(area_name,found)
+        _store_training_locations(area_name,found[:80])
+        found=found[:80]
     except Exception:
-        # Offline of PDOK tijdelijk traag: gebruik eerder gecachte BAG-adressen.
-        found=[{"name":r["name"],"lat":r["lat"],"lon":r["lon"],
-                "area":area_name,"source":r["source"]} for r in disk]
+        found=list(disk)
 
     if not found:
-        raise RuntimeError(f"Geen concrete PDOK/BAG-adressen beschikbaar rond {area_name}.")
-
+        raise RuntimeError(f"Geen BAG-adressen beschikbaar rond {area_name}.")
     with _training_location_lock:
         _training_location_cache[key]=list(found)
     return found
 
-def build_training_location_pool(rng,count,progress=None):
-    anchors=list(ANCHORS)
-    rng.shuffle(anchors)
-    target=max(30,min(120,24+count))
-    pool=[]
-    seen=set()
+def _pdok_geocode(query,label,municipality,zone,category):
+    params={
+        "q":query,"rows":"8","fq":"type:adres",
+        "fl":"weergavenaam,centroide_ll,gemeentenaam","wt":"json",
+    }
+    req=urllib.request.Request(
+        PDOK_FREE+"?"+urllib.parse.urlencode(params),
+        headers={"User-Agent":USER_AGENT,"Accept":"application/json"},
+    )
+    with urllib.request.urlopen(req,timeout=9) as resp:
+        root=json.loads(resp.read().decode("utf-8"))
+    docs=((root.get("response") or {}).get("docs") or [])
+    best=None
+    for doc in docs:
+        point=_parse_wkt_point(doc.get("centroide_ll"))
+        if not point:
+            continue
+        mun=str(doc.get("gemeentenaam","") or "")
+        if municipality and mun and mun.lower()!=municipality.lower():
+            continue
+        best=(doc,point)
+        break
+    if not best:
+        raise RuntimeError("Adres niet gevonden: "+query)
+    doc,(lat,lon)=best
+    return {
+        "name":label+" · "+str(doc.get("weergavenaam") or query),
+        "lat":lat,"lon":lon,"source":"PDOK/BAG",
+        "area":label,"municipality":municipality,"zone":zone,
+        "category":category,
+    }
 
-    for idx,anchor in enumerate(anchors):
+def hospital_locations():
+    cached=_cached_training_locations("__hospitals__","hospital")
+    if len(cached)>=5:
+        return cached
+
+    found=[]
+    for label,query,municipality,zone in HOSPITAL_SPECS:
+        try:
+            found.append(_pdok_geocode(
+                query,label,municipality,zone,"hospital"
+            ))
+        except Exception:
+            continue
+    if found:
+        _store_training_locations("__hospitals__",found)
+    if len(found)<3 and cached:
+        found=cached
+    if len(found)<3:
+        raise RuntimeError("Te weinig ziekenhuislocaties beschikbaar.")
+    return found
+
+def _osm_point(element):
+    if "lat" in element and "lon" in element:
+        return float(element["lat"]),float(element["lon"])
+    center=element.get("center") or {}
+    if "lat" in center and "lon" in center:
+        return float(center["lat"]),float(center["lon"])
+    return None
+
+def _nearest_inner_municipality(lat,lon):
+    candidates=[]
+    for name,a_lat,a_lon,municipality,zone in AREA_SEEDS:
+        if zone!="inside":
+            continue
+        candidates.append((
+            haversine_m(lat,lon,a_lat,a_lon),municipality,name
+        ))
+    candidates.sort(key=lambda x:x[0])
+    return candidates[0] if candidates else (1e9,"","")
+
+def care_locations():
+    cached=_cached_training_locations("__care__","care")
+    if len(cached)>=12:
+        return cached
+
+    # Alleen categorie-ontdekking gebruikt Overpass; gewone adressen en
+    # iedere route zelf zijn hier niet meer van afhankelijk.
+    query=(
+        '[out:json][timeout:20];('
+        'nwr["social_facility"~"nursing_home|assisted_living|group_home"](51.43,4.88,51.72,5.25);'
+        'nwr["amenity"="nursing_home"](51.43,4.88,51.72,5.25);'
+        'nwr["healthcare"="nursing_home"](51.43,4.88,51.72,5.25);'
+        ');out center tags;'
+    )
+    payload=urllib.parse.urlencode({"data":query}).encode("utf-8")
+    req=urllib.request.Request(
+        OVERPASS_URL,data=payload,method="POST",
+        headers={
+            "User-Agent":USER_AGENT,
+            "Accept":"application/json",
+            "Content-Type":"application/x-www-form-urlencoded; charset=UTF-8",
+        }
+    )
+
+    found=[]
+    try:
+        with urllib.request.urlopen(req,timeout=20) as resp:
+            root=json.loads(resp.read().decode("utf-8"))
+        seen=set()
+        for element in root.get("elements",[]):
+            point=_osm_point(element)
+            tags=element.get("tags") or {}
+            name=str(tags.get("name","") or "").strip()
+            if not point or not name:
+                continue
+            lat,lon=point
+            city=str(tags.get("addr:city","") or "").strip().lower()
+            municipality=PLACE_TO_MUNICIPALITY.get(city,"")
+            if not municipality:
+                dist,municipality,_seed=_nearest_inner_municipality(lat,lon)
+                if dist>9000:
+                    continue
+            if municipality not in INNER_MUNICIPALITIES:
+                continue
+            street=str(tags.get("addr:street","") or "").strip()
+            number=str(tags.get("addr:housenumber","") or "").strip()
+            address=" ".join(x for x in (street,number) if x).strip()
+            label=name+(" · "+address if address else "")
+            key=(name.lower(),round(lat,5),round(lon,5))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({
+                "name":label,"lat":lat,"lon":lon,
+                "source":"OpenStreetMap zorg-POI",
+                "area":municipality,"municipality":municipality,
+                "zone":"inside","category":"care",
+            })
+        found=found[:100]
+        if found:
+            _store_training_locations("__care__",found)
+    except Exception:
+        found=list(cached)
+
+    if len(found)<5:
+        if len(cached)>=5:
+            return cached
+        raise RuntimeError("Te weinig zorginstellingen gevonden.")
+    return found
+
+def build_training_pools(rng,count,progress=None):
+    general=[]
+    seen=set()
+    seeds=list(AREA_SEEDS)
+    rng.shuffle(seeds)
+
+    for idx,anchor in enumerate(seeds):
         if progress:
             progress(
                 "Bestemmingen verzamelen",
-                f"PDOK/BAG-adressen ophalen rond {anchor[0]} ({idx+1}/{len(anchors)})"
+                f"Adressen spreiden over regio: {anchor[0]} ({idx+1}/{len(seeds)})"
             )
         try:
             items=discover_training_locations(anchor)
         except Exception:
             continue
+
+        # Pak per gebied een kleine willekeurige steekproef in plaats van
+        # vroeg te stoppen zodra de eerste paar gebieden genoeg adressen geven.
+        items=list(items)
         rng.shuffle(items)
-        for item in items[:14]:
+        for item in items[:8]:
             key=(item["name"].lower(),round(item["lat"],6),round(item["lon"],6))
             if key in seen:
                 continue
             seen.add(key)
-            pool.append((item["name"],item["lat"],item["lon"]))
-            if len(pool)>=target:
-                return pool
+            general.append(item)
 
-    if len(pool)<12:
+    if len(general)<40:
         raise RuntimeError(
-            "Te weinig concrete BAG-adressen beschikbaar. "
-            "Controleer internetverbinding of probeer de broncheck."
+            f"Te weinig verspreide adressen gevonden ({len(general)})."
         )
-    return pool
+
+    hospitals=hospital_locations()
+    care=care_locations()
+    rng.shuffle(general);rng.shuffle(hospitals);rng.shuffle(care)
+    return {
+        "general":general,
+        "hospital":hospitals,
+        "care":care,
+        "inside":[x for x in general if x.get("zone")=="inside"],
+        "outside":[x for x in general if x.get("zone")=="outside"],
+    }
+
+def quota_plan(count):
+    # Bij 25: exact minimaal 5 ziekenhuis + 5 zorg. Bij andere batchgroottes
+    # dezelfde 20/20%-verhouding, met minstens 1 zodra er ruimte is.
+    hospital=5 if count>=25 else max(1,round(count*0.20))
+    care=5 if count>=25 else max(1,round(count*0.20))
+    if hospital+care>count:
+        care=max(0,count-hospital)
+    general=count-hospital-care
+    plan=["hospital"]*hospital+["care"]*care+["general"]*general
+    return plan
 
 
 SAFE_ENDPOINT_CLASSES = {
