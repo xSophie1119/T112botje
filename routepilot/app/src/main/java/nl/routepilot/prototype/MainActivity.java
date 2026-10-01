@@ -90,6 +90,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private String currentWarning = "";
     private long lastPreparationMs = 0L;
     private LookAheadEngine.Result currentLookAhead = new LookAheadEngine.Result();
+    private final NavigationMapMatcher.State mapMatchState = new NavigationMapMatcher.State();
+    private final ArrivalDetector.State arrivalDetectorState = new ArrivalDetector.State();
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private boolean waitMinuteAnnounced = false;
@@ -824,6 +826,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         announcedBridgeEvents.clear();
         announcedTempSpeeds.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
+        mapMatchState.reset();
+        arrivalDetectorState.reset();
         lastRerouteMs = System.currentTimeMillis();
         lastTrafficRefreshMs = System.currentTimeMillis();
 
@@ -863,8 +867,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (!navigating || currentRoute == null || currentDestination == null) return;
 
         double lat = location.getLatitude(), lon = location.getLongitude();
-        int routeIndex = OnlineServices.closestRoutePointIndex(lat, lon, currentRoute.points);
-        double offRoute = OnlineServices.distanceFromRouteMeters(lat, lon, currentRoute.points);
+        NavigationMapMatcher.Match matched =
+                NavigationMapMatcher.match(location, currentRoute.points, mapMatchState);
+        int routeIndex = matched.index >= 0 ? matched.index
+                : OnlineServices.closestRoutePointIndex(lat, lon, currentRoute.points);
+        double offRoute = matched.index >= 0 ? matched.distanceM
+                : OnlineServices.distanceFromRouteMeters(lat, lon, currentRoute.points);
 
         if (offRoute < 55) learnedThisDeviation = false;
 
@@ -973,7 +981,18 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             refreshLiveTraffic();
         }
 
-        if (toDestination < 35) {
+        double arrivalTargetLat = currentArrival != null
+                && currentArrival.recommendedStop != null
+                ? currentArrival.recommendedStop.getLatitude() : currentDestination.lat;
+        double arrivalTargetLon = currentArrival != null
+                && currentArrival.recommendedStop != null
+                ? currentArrival.recommendedStop.getLongitude() : currentDestination.lon;
+        double toArrivalTarget = OnlineServices.distanceMeters(
+                lat, lon, arrivalTargetLat, arrivalTargetLon);
+        double speedForArrival = location.hasSpeed() ? Math.max(0.0, location.getSpeed() * 3.6) : 0.0;
+        double accuracyForArrival = location.hasAccuracy() ? location.getAccuracy() : 35.0;
+        if (ArrivalDetector.update(arrivalDetectorState, System.currentTimeMillis(),
+                toArrivalTarget, remaining, offRoute, speedForArrival, accuracyForArrival)) {
             arrive();
             return;
         }
@@ -1228,6 +1247,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     }
 
     private void applyReroute(String note) {
+        mapMatchState.reset();
+        arrivalDetectorState.reset();
         drawCurrentRoute();
         showDestinationMarker();
         RoutePilotState.saveRoute(this, currentRoute);
