@@ -910,10 +910,29 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                 : currentAnalysis.score >= 58 ? ORANGE : RED);
 
         double kmh = location.hasSpeed() ? Math.max(0, location.getSpeed() * 3.6) : 0;
+        WmoSessionManager.Snapshot wmoEta = WmoSessionManager.get(this);
+        double extraServiceSeconds = 0.0;
+        String operationLabel = "";
+        if (wmoEta.phase == WmoSessionManager.Phase.TO_PICKUP) {
+            extraServiceSeconds = WmoSessionManager.averageWaitSeconds(this);
+            operationLabel = "verwacht vertrek";
+        } else if (wmoEta.phase == WmoSessionManager.Phase.TO_DROPOFF) {
+            extraServiceSeconds = WmoSessionManager.averageDropoffSeconds(this);
+            operationLabel = "rit gereed";
+        }
+
+        String operationEta = "";
+        if (extraServiceSeconds > 0.0) {
+            long operationMs = etaMs + (long)(extraServiceSeconds * 1000.0);
+            operationEta = " • " + operationLabel + " ~"
+                    + new SimpleDateFormat("HH:mm", NL).format(new Date(operationMs));
+        }
+
         navMeta.setText(String.format(NL,
-                "%.1f km resterend • aankomst %s • %.0f km/u%s",
+                "%.1f km resterend • aankomst %s • %.0f km/u%s%s",
                 remaining / 1000.0, etaText, kmh,
-                currentAnalysis.destinationOnRight ? " • 🚪 rechts" : " • 🚪 controle"));
+                currentAnalysis.destinationOnRight ? " • 🚪 rechts" : " • 🚪 controle",
+                operationEta));
 
         updateStepGuidance(lat, lon);
         updateGeofencedWarnings(lat, lon, routeIndex);
