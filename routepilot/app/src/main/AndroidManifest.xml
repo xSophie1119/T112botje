@@ -6,7 +6,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="RoutePilot V1 Debug"
+        android:label="RoutePilot V1.1 Debug"
         android:icon="@drawable/ic_routepilot"
         android:theme="@style/Theme.RoutePilot"
         android:supportsRtl="true"
