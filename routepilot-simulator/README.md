@@ -52,3 +52,32 @@ python server.py
 ```
 
 De browser vraagt dan om het token. Publiceer deze ontwikkelserver niet rechtstreeks op internet.
+
+
+## Correcties naar de Android-app synchroniseren
+
+RoutePilot V3.2 kan de actieve portalcorrecties rechtstreeks ophalen.
+
+1. Start het portaal op je computer.
+2. Als de telefoon dezelfde computer niet via `127.0.0.1` kan bereiken, start de server op je LAN:
+   ```bat
+   set ROUTEPILOT_SIM_HOST=0.0.0.0
+   set ROUTEPILOT_PORTAL_TOKEN=kies-een-lang-token
+   python server.py
+   ```
+3. Open in RoutePilot **⚙ Voertuigprofiel**.
+4. Vul bij Simulator / Correctieportaal de LAN-URL in, bijvoorbeeld `http://192.168.1.20:8765`, plus hetzelfde token.
+5. Tik op **Sync portalcorrecties**.
+
+De debugbuild staat lokale HTTP toe zodat een laptop op hetzelfde netwerk bereikbaar is. Een releasebuild houdt cleartext-verkeer uitgeschakeld.
+
+### Wat de app met portalcorrecties doet
+
+- `road_closed`, `bus_trap`, `height_block`, `too_narrow`: harde correctiehits; kunnen alternative/adaptive detours triggeren.
+- `avoid` / `prefer`: beïnvloeden de routekeuze.
+- `entrance`: vervangt het adrespunt voor de deurzijde-analyse.
+- `good_stop`: wordt gebruikt als WMO-stoppunt.
+- `ignore_door_side`: schakelt de rechterdeurvoorkeur lokaal uit.
+- `lift_ok` / `lift_bad`: voedt de aankomst-/liftassistent.
+- `turning_ok`: bevestigt keer-/vertrekruimte.
+- busbaancorrecties beïnvloeden de voorkeur, maar officiële verkeersregels en fysieke bebording blijven leidend.
