@@ -219,16 +219,32 @@ with db() as con:
         "origin_target_to_stop_m":"REAL NOT NULL DEFAULT 0",
         "destination_target_to_stop_m":"REAL NOT NULL DEFAULT 0",
         "generator_version":"TEXT NOT NULL DEFAULT 'legacy'",
+        "trip_category":"TEXT NOT NULL DEFAULT 'general'",
+        "origin_zone":"TEXT NOT NULL DEFAULT ''",
+        "destination_zone":"TEXT NOT NULL DEFAULT ''",
+        "origin_municipality":"TEXT NOT NULL DEFAULT ''",
+        "destination_municipality":"TEXT NOT NULL DEFAULT ''",
+        "ring_rule":"TEXT NOT NULL DEFAULT ''",
     }
     for name,definition in additions.items():
         if name not in existing:
             con.execute(f"ALTER TABLE scenarios ADD COLUMN {name} {definition}")
+
+    tl_existing={row["name"] for row in con.execute("PRAGMA table_info(training_locations)").fetchall()}
+    tl_additions={
+        "municipality":"TEXT NOT NULL DEFAULT ''",
+        "zone":"TEXT NOT NULL DEFAULT ''",
+        "category":"TEXT NOT NULL DEFAULT 'general'",
+    }
+    for name,definition in tl_additions.items():
+        if name not in tl_existing:
+            con.execute(f"ALTER TABLE training_locations ADD COLUMN {name} {definition}")
     # Oude scenario's zijn gegenereerd met grove wijkankers en worden niet
     # langer als geldige training aangeboden. Correcties staan in een aparte
     # tabel en blijven behouden.
     con.execute(
         "UPDATE scenarios SET generator_version='legacy' "
-        "WHERE generator_version IS NULL OR generator_version='' OR generator_version<>'3.4.0'"
+        "WHERE generator_version IS NULL OR generator_version='' OR generator_version<>'3.5.0'"
     )
     con.execute(
         "UPDATE batch_runs SET status='failed',stage='Onderbroken',"
