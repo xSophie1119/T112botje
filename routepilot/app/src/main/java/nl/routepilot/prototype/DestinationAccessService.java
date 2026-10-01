@@ -31,8 +31,8 @@ public final class DestinationAccessService {
         public final List<String> notes = new ArrayList<>();
 
         public boolean shouldSkipDoorPreference() {
-            return oneWayNearby || barrierNearby
-                    || (deadEndSignal && turningOptions == 0);
+            return !RoutingRules.doorPreferenceAllowed(
+                    oneWayNearby, barrierNearby, deadEndSignal, turningOptions);
         }
 
         public String summary() {
