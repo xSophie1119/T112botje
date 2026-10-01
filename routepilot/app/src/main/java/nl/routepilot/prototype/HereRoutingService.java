@@ -39,7 +39,7 @@ public final class HereRoutingService {
                 .append("&alternatives=2")
                 .append("&lang=nl-NL")
                 .append("&units=metric")
-                .append("&return=polyline,summary,actions,instructions,notices")
+                .append("&return=polyline,summary,actions,instructions")
                 .append("&avoid%5Bfeatures%5D=uTurns")
                 .append("&vehicle%5Bheight%5D=").append((int)Math.round(vehicle.heightM*100.0))
                 .append("&vehicle%5Bwidth%5D=").append((int)Math.round(vehicle.widthM*100.0))
