@@ -23,7 +23,7 @@ import java.util.Set;
 public final class OnlineServices {
 
     public static final String USER_AGENT =
-            "RoutePilot/1.0-debug (personal Android prototype; https://github.com/xSophie1119)";
+            "RoutePilot/2.0-debug (personal Android prototype; https://github.com/xSophie1119)";
 
     private static final Locale NL = new Locale("nl", "NL");
 
@@ -105,6 +105,7 @@ public final class OnlineServices {
         public final List<NavStep> steps;
         public List<Restriction> restrictions = new ArrayList<>();
         public List<LiveTrafficService.TrafficEvent> trafficEvents = new ArrayList<>();
+        public List<RoadDataService.Sign> roadSigns = new ArrayList<>();
         public String selectionNote = "";
 
         public RouteResult(List<GeoPoint> points, double distanceMeters,
@@ -368,18 +369,22 @@ public final class OnlineServices {
 
             if (hasBusLaneSignal(tags)) {
                 String busLaneDetail = busLaneDetail(tags);
-                if (vehicle.busLaneExemption) {
+                boolean exemptionHere = vehicle.busLaneExemption
+                        && MunicipalityService.isInTilburg(lat, lon);
+                if (exemptionHere) {
                     addUnique(out, seen, new Restriction(
                             lat, lon, "BUSBAAN", busLaneDetail,
-                            "Busbaan of bus-/PSV-gereserveerde rijstrook gevonden (" + busLaneDetail + "). "
-                                    + "In jouw profiel staat de busbaanvrijstelling aan.",
+                            "Busbaan/bus-/PSV-rijstrook in gemeente Tilburg gevonden (" + busLaneDetail + "). "
+                                    + "Tilburgse busbaanontheffing is hier actief.",
                             false, true
                     ));
                 } else {
+                    String why = vehicle.busLaneExemption
+                            ? "De ontheffing geldt buiten gemeente Tilburg niet."
+                            : "Er staat geen busbaanontheffing aan.";
                     addUnique(out, seen, new Restriction(
                             lat, lon, "BUSBAAN", busLaneDetail,
-                            "Busbaan of bus-/PSV-gereserveerde rijstrook gevonden (" + busLaneDetail + ") "
-                                    + "zonder actieve vrijstelling in het voertuigprofiel.",
+                            "Busbaan/bus-/PSV-rijstrook gevonden (" + busLaneDetail + "). " + why,
                             true, false
                     ));
                 }
@@ -391,9 +396,33 @@ public final class OnlineServices {
                     tags.optString("maxwidth", ""), vehicle.widthM, "m", 0.16);
             addNumericRestriction(out, seen, lat, lon, "GEWICHT",
                     tags.optString("maxweight", ""), vehicle.maxWeightT, "t", 0.35);
+
+            addNarrowRoadSignal(out, seen, lat, lon, tags, route.points);
         }
 
         return out;
+    }
+
+    private static void addNarrowRoadSignal(List<Restriction> out, Set<String> seen,
+                                            double lat, double lon, JSONObject tags,
+                                            List<GeoPoint> routePoints) {
+        if (distanceToRouteMeters(lat, lon, routePoints) > 24.0) return;
+        String highway = tags.optString("highway", "");
+        Double width = parseFirstNumber(tags.optString("width", ""));
+        String service = tags.optString("service", "");
+        boolean narrow = width != null && width <= 3.25;
+        boolean crampedType = "living_street".equals(highway)
+                || "track".equals(highway)
+                || ("service".equals(highway) && !"parking_aisle".equals(service));
+        if (!narrow && !crampedType) return;
+
+        String value = width == null ? highway : String.format(NL, "%.2f m", width);
+        String desc = narrow
+                ? "Wegbreedte rond " + value + "; krap voor rolstoelbus."
+                : "Krap wegtype " + highway + "; extra manoeuvreerruimte controleren.";
+        addUnique(out, seen, new Restriction(
+                lat, lon, "SMALLE WEG", value, desc, false, false
+        ));
     }
 
     private static boolean hasBusLaneSignal(JSONObject tags) {
@@ -531,6 +560,43 @@ public final class OnlineServices {
             sb.append(',').append(lastText);
         }
         return sb.toString();
+    }
+
+    public static RouteResult reverseApproachCandidate(double fromLat, double fromLon,
+                                                       double toLat, double toLon,
+                                                       RouteResult reference) throws Exception {
+        double bearing = reference == null ? 0.0 : RouteAnalysis.approachBearing(reference.points);
+        double[] beyond = project(toLat, toLon, bearing, 130.0);
+        String url = String.format(Locale.US,
+                "https://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f;%.6f,%.6f"
+                        + "?overview=full&geometries=geojson&steps=true&alternatives=false&continue_straight=true",
+                fromLon, fromLat, beyond[1], beyond[0], toLon, toLat);
+        JSONObject root = new JSONObject(get(url, 22000));
+        JSONArray routes = root.optJSONArray("routes");
+        if (routes == null || routes.length() == 0) {
+            throw new IllegalArgumentException("Geen omgekeerde aanrijroute beschikbaar.");
+        }
+        JSONObject route = routes.getJSONObject(0);
+        return new RouteResult(
+                parseGeometry(route),
+                route.optDouble("distance", 0),
+                route.optDouble("duration", 0),
+                parseSteps(route)
+        );
+    }
+
+    private static double[] project(double lat, double lon, double bearingDeg, double meters) {
+        double r = 6371000.0;
+        double br = Math.toRadians(bearingDeg);
+        double lat1 = Math.toRadians(lat);
+        double lon1 = Math.toRadians(lon);
+        double dr = meters / r;
+        double lat2 = Math.asin(Math.sin(lat1) * Math.cos(dr)
+                + Math.cos(lat1) * Math.sin(dr) * Math.cos(br));
+        double lon2 = lon1 + Math.atan2(
+                Math.sin(br) * Math.sin(dr) * Math.cos(lat1),
+                Math.cos(dr) - Math.sin(lat1) * Math.sin(lat2));
+        return new double[]{Math.toDegrees(lat2), Math.toDegrees(lon2)};
     }
 
     public static RouteResult chooseSafer(RouteResult current, RouteResult challenger) {
