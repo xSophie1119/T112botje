@@ -78,6 +78,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private boolean routeLoading = false;
 
     private long lastRerouteMs = 0L;
+    private long lastTrafficRefreshMs = 0L;
     private int currentStepIndex = 0;
     private final Set<Integer> announcedApproachSteps = new HashSet<>();
     private final Set<Integer> announcedNearSteps = new HashSet<>();
@@ -588,6 +589,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         int critical = currentRoute == null ? 0 : currentRoute.criticalCount();
         int caution = currentRoute == null ? 0 : currentRoute.cautionCount();
         int closures = currentRoute == null ? 0 : currentRoute.liveClosureCount();
+        int liveEvents = currentRoute == null || currentRoute.trafficEvents == null
+                ? 0 : currentRoute.trafficEvents.size();
         int info = 0;
         if (currentRoute != null) {
             for (OnlineServices.Restriction r : currentRoute.restrictions) {
@@ -597,14 +600,20 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         StringBuilder sb = new StringBuilder();
 
-        if (closures > 0) {
-            sb.append("🚧 NDW ACTUEEL: ").append(closures)
-                    .append(closures == 1 ? " afsluiting langs deze route." : " afsluitingen langs deze route.");
-            int shownClosures = 0;
+        if (liveEvents > 0) {
+            sb.append("📡 NDW ACTUEEL: ").append(liveEvents)
+                    .append(liveEvents == 1 ? " verkeersmelding" : " verkeersmeldingen");
+            if (closures > 0) {
+                sb.append(" • ").append(closures)
+                        .append(closures == 1 ? " afsluiting" : " afsluitingen");
+            }
+            sb.append(" langs deze route.");
+
+            int shownLive = 0;
             for (LiveTrafficService.TrafficEvent e : currentRoute.trafficEvents) {
-                if (!e.closure || shownClosures >= 3) continue;
-                sb.append("\n• ").append(e.description);
-                shownClosures++;
+                if (shownLive >= 4) break;
+                sb.append("\n• ").append(e.type).append(": ").append(e.description);
+                shownLive++;
             }
             sb.append("\n");
         }
@@ -641,6 +650,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (currentRoute.liveClosureCount() > 0) return RED;
         if (currentRoute.criticalCount() > 0) return RED;
         if (currentRoute.cautionCount() > 0) return ORANGE;
+        if (currentRoute.trafficEvents != null && !currentRoute.trafficEvents.isEmpty()) return ORANGE;
         return GREEN;
     }
 
@@ -655,6 +665,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         announcedTrafficEvents.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
         lastRerouteMs = System.currentTimeMillis();
+        lastTrafficRefreshMs = System.currentTimeMillis();
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -715,6 +726,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         updateStepGuidance(lat, lon);
         updateRestrictionWarnings(lat, lon);
 
+        if (!routeLoading
+                && System.currentTimeMillis() - lastTrafficRefreshMs > 130_000L) {
+            lastTrafficRefreshMs = System.currentTimeMillis();
+            refreshLiveTraffic();
+        }
+
         double toDestination = OnlineServices.distanceMeters(
                 lat, lon, currentDestination.lat, currentDestination.lon);
         if (toDestination < 35) {
@@ -726,6 +743,50 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             map.getController().animateTo(new GeoPoint(lat, lon));
             if (map.getZoomLevelDouble() < 16.0) map.getController().setZoom(17.0);
         }
+    }
+
+    private void refreshLiveTraffic() {
+        if (currentRoute == null || currentDestination == null || !navigating) return;
+
+        final OnlineServices.RouteResult routeSnapshot = currentRoute;
+        new Thread(() -> {
+            try {
+                List<LiveTrafficService.TrafficEvent> events =
+                        LiveTrafficService.eventsNearRoute(routeSnapshot.points);
+                int oldClosures = routeSnapshot.liveClosureCount();
+                int newClosures = 0;
+                for (LiveTrafficService.TrafficEvent e : events) {
+                    if (e.closure) newClosures++;
+                }
+
+                final int finalNewClosures = newClosures;
+                runOnUiThread(() -> {
+                    if (currentRoute != routeSnapshot) return;
+                    currentRoute.trafficEvents = events;
+                    drawCurrentRoute();
+
+                    if (finalNewClosures > oldClosures && !routeLoading) {
+                        navStatus.setText("🚧 NIEUWE ACTUELE AFSLUITING • HERROUTEREN");
+                        speak("Nieuwe actuele afsluiting op of vlak langs de route. "
+                                + "RoutePilot berekent opnieuw.");
+                        lastRerouteMs = System.currentTimeMillis();
+                        setRouteLoading(true);
+                        new Thread(() -> {
+                            try {
+                                calculateRouteInWorker(currentDestination, true);
+                            } catch (Exception e) {
+                                runOnUiThread(() -> {
+                                    navStatus.setText("🚧 AFSLUITING • herrouteren mislukt");
+                                    setRouteLoading(false);
+                                });
+                            }
+                        }).start();
+                    }
+                });
+            } catch (Exception ignored) {
+                // Behoud de laatst bekende live verkeerslaag als NDW tijdelijk niet bereikbaar is.
+            }
+        }).start();
     }
 
     private void updateStepGuidance(double lat, double lon) {
@@ -785,14 +846,20 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             for (int i = 0; i < currentRoute.trafficEvents.size(); i++) {
                 if (announcedTrafficEvents.contains(i)) continue;
                 LiveTrafficService.TrafficEvent e = currentRoute.trafficEvents.get(i);
-                if (!e.closure) continue;
 
                 double d = OnlineServices.distanceMeters(lat, lon, e.lat, e.lon);
-                if (d < 850) {
+                double trigger = e.closure ? 850 : 500;
+                if (d < trigger) {
                     announcedTrafficEvents.add(i);
-                    navStatus.setText("🚧 ACTUELE AFSLUITING OP ROUTE");
-                    speak("Let op. Actuele afsluiting gemeld door NDW. "
-                            + e.description + ". Controleer de route en bebording.");
+                    if (e.closure) {
+                        navStatus.setText("🚧 ACTUELE AFSLUITING OP ROUTE");
+                        speak("Let op. Actuele afsluiting gemeld door NDW. "
+                                + e.description + ". Controleer de route en bebording.");
+                    } else {
+                        navStatus.setText("📡 ACTUELE VERKEERSINFO");
+                        speak("Actuele verkeersmelding. " + e.type + ". "
+                                + e.description);
+                    }
                 }
             }
         }
