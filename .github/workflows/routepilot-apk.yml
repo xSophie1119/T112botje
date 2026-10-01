@@ -81,6 +81,8 @@ jobs:
           spec.loader.exec_module(mod)
           assert len(mod.ANCHORS) >= 30
           assert len(mod.INNER_MUNICIPALITIES) == 8
+          assert len(mod.HOSPITAL_SPECS) == 5
+          assert len(mod.CARE_SPECS) >= 13
           q = mod.quota_plan(25)
           assert q.count('hospital') >= 5
           assert q.count('care') >= 5
@@ -125,8 +127,13 @@ jobs:
           assert status['osrm']['ok'], status['osrm']
           pools = mod.build_training_pools(random.Random(32026), 25)
           assert len(pools['general']) >= 40
-          assert len(pools['hospital']) >= 5
-          assert len(pools['care']) >= 5
+          assert len(pools['hospital']) == 5
+          assert len(pools['care']) >= 10
+          hospital_names = {x['name'].split(' · ',1)[0] for x in pools['hospital']}
+          assert hospital_names == {
+              'ETZ Elisabeth','ETZ TweeSteden','ETZ Waalwijk',
+              'Amphia Breda','Jeroen Bosch Ziekenhuis'
+          }
           assert pools['inside']
           assert pools['outside']
           print('POOLS:', len(pools['general']), 'general,', len(pools['hospital']), 'hospital,', len(pools['care']), 'care')
@@ -153,12 +160,12 @@ jobs:
         run: |
           test -f routepilot-simulator/START_SIMULATOR_LAN.bat
           test -f routepilot-simulator/server.py
-          mkdir -p RoutePilot-V3.5.0-PC
-          cp -R routepilot-simulator/* RoutePilot-V3.5.0-PC/
+          mkdir -p RoutePilot-V3.5.1-PC
+          cp -R routepilot-simulator/* RoutePilot-V3.5.1-PC/
 
       - name: Upload Windows simulator package
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V3.5.0-PC-Simulator
-          path: RoutePilot-V3.5.0-PC
+          name: RoutePilot-V3.5.1-PC-Simulator
+          path: RoutePilot-V3.5.1-PC
           if-no-files-found: error
