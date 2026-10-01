@@ -1027,17 +1027,110 @@ def _batch_snapshot(batch_id):
         row=con.execute("SELECT * FROM batch_runs WHERE batch_id=?",(batch_id,)).fetchone()
     return dict(row) if row else None
 
-def _pick_pair(rng,locations,used):
-    for _ in range(500):
-        a,b=rng.sample(range(len(locations)),2)
-        key=(a,b)
-        if key in used:
+def _loc_key(item):
+    return (
+        item.get("name","").lower(),
+        round(float(item.get("lat",0)),5),
+        round(float(item.get("lon",0)),5),
+    )
+
+def _least_used_choice(rng,items,usage,max_repeat=None):
+    if not items:
+        return None
+    shuffled=list(items)
+    rng.shuffle(shuffled)
+    min_use=min(usage.get(_loc_key(x),0) for x in shuffled)
+    candidates=[
+        x for x in shuffled
+        if usage.get(_loc_key(x),0)==min_use
+        and (max_repeat is None or usage.get(_loc_key(x),0)<max_repeat)
+    ]
+    if not candidates:
+        candidates=shuffled
+    return rng.choice(candidates)
+
+def _pick_pair_for_category(
+    rng,pools,category,used_pairs,origin_usage,destination_usage,
+    municipality_usage,outside_pickups,target_outside_pickups
+):
+    for _ in range(900):
+        if category=="hospital":
+            dest_pool=pools["hospital"]
+            destination=_least_used_choice(
+                rng,dest_pool,destination_usage,max_repeat=2
+            )
+        elif category=="care":
+            destination=_least_used_choice(
+                rng,pools["care"],destination_usage,max_repeat=1
+            )
+        else:
+            # Gewone ritten spreiden expliciet over binnen/buiten.
+            mode_roll=rng.random()
+            if mode_roll<0.50:
+                mode="inside_inside"
+            elif mode_roll<0.76:
+                mode="inside_outside"
+            else:
+                mode="outside_inside"
+
+            if mode=="inside_outside" and pools["outside"]:
+                destination=_least_used_choice(
+                    rng,pools["outside"],destination_usage,max_repeat=1
+                )
+            else:
+                destination=_least_used_choice(
+                    rng,pools["inside"],destination_usage,max_repeat=1
+                )
+
+        if destination is None:
             continue
-        origin,destination=locations[a],locations[b]
-        direct=haversine_m(origin[1],origin[2],destination[1],destination[2])
-        if direct<700.0 or direct>32000.0:
+
+        # Buitenbestemming => oorsprong verplicht binnengebied.
+        if destination.get("zone")=="outside":
+            origin_pool=pools["inside"]
+        else:
+            # Probeer ongeveer 25-30% van de ophaallocaties uit de buitenring
+            # te laten komen. Nooit buiten->buiten.
+            want_outside=(
+                outside_pickups<target_outside_pickups
+                and pools["outside"]
+                and rng.random()<0.62
+            )
+            origin_pool=pools["outside"] if want_outside else pools["inside"]
+
+        # Kies bij voorkeur gemeenten die in deze batch nog weinig aan bod kwamen.
+        candidates=list(origin_pool)
+        rng.shuffle(candidates)
+        if not candidates:
             continue
-        used.add(key)
+        min_mun=min(
+            municipality_usage.get(x.get("municipality",""),0)
+            for x in candidates
+        )
+        spread=[
+            x for x in candidates
+            if municipality_usage.get(x.get("municipality",""),0)<=min_mun+1
+        ]
+        origin=_least_used_choice(rng,spread,origin_usage,max_repeat=1)
+        if origin is None:
+            continue
+
+        if _loc_key(origin)==_loc_key(destination):
+            continue
+        if origin.get("zone")=="outside" and destination.get("zone")=="outside":
+            continue
+
+        direct=haversine_m(
+            origin["lat"],origin["lon"],destination["lat"],destination["lon"]
+        )
+        # Snelle voorfilter. Definitieve grens is de OSRM-routeafstand.
+        if direct<650.0 or direct>30000.0:
+            continue
+
+        key=(_loc_key(origin),_loc_key(destination),category)
+        if key in used_pairs:
+            continue
+        used_pairs.add(key)
         return origin,destination
     return None
 
@@ -1047,80 +1140,133 @@ def run_batch(batch_id,count,seed):
     try:
         _update_batch(
             batch_id,status="running",stage="Bestemmingen verzamelen",
-            message="Concrete PDOK/BAG-adressen voorbereiden…"
+            message="Hele Regiovervoer-gebied en zorglocaties voorbereiden…"
         )
 
         def progress(stage,message):
             _update_batch(batch_id,stage=stage,message=message)
 
-        locations=build_training_location_pool(rng,count,progress=progress)
+        pools=build_training_pools(rng,count,progress=progress)
+        plan=quota_plan(count)
+        rng.shuffle(plan)
+
+        hospital_required=plan.count("hospital")
+        care_required=plan.count("care")
+        general_required=plan.count("general")
         _update_batch(
             batch_id,stage="Routes simuleren",
-            message=f"{len(locations)} concrete bestemmingen klaar. Routes worden berekend."
+            message=(
+                f"{len(pools['general'])} adressen • "
+                f"{len(pools['hospital'])} ziekenhuizen • "
+                f"{len(pools['care'])} zorginstellingen. "
+                f"Doel: {hospital_required} ziekenhuis / "
+                f"{care_required} zorg / {general_required} overig."
+            )
         )
 
         corrections=active_corrections()
-        workers=max(1,min(6,int(os.environ.get("ROUTEPILOT_SIM_WORKERS","4"))))
-        used=set()
-        max_attempts=max(count*4,count+12)
+        workers=max(1,min(5,int(os.environ.get("ROUTEPILOT_SIM_WORKERS","4"))))
+        used_pairs=set()
+        origin_usage={}
+        destination_usage={}
+        municipality_usage={}
+        target_outside_pickups=max(1,round(count*0.28))
+        outside_pickups=0
+        max_attempts=max(count*7,count+25)
+
+        # Ieder vereist categorie-slot blijft in de queue totdat precies
+        # die categorie een geldige rit heeft opgeleverd.
+        pending=list(plan)
+        successful_by_category={"hospital":0,"care":0,"general":0}
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            while success<count and completed<max_attempts:
-                need=count-success
-                wave_size=min(workers,need,max_attempts-completed)
-                pairs=[]
+            while pending and completed<max_attempts:
+                wave_size=min(workers,len(pending),max_attempts-completed)
+                jobs=[]
+                selected_categories=[]
+
                 for _ in range(wave_size):
-                    pair=_pick_pair(rng,locations,used)
+                    category=pending.pop(0)
+                    pair=_pick_pair_for_category(
+                        rng,pools,category,used_pairs,
+                        origin_usage,destination_usage,municipality_usage,
+                        outside_pickups,target_outside_pickups
+                    )
                     if pair is None:
-                        break
-                    pairs.append(pair)
-                if not pairs:
+                        pending.append(category)
+                        continue
+                    origin,destination=pair
+                    future=pool.submit(
+                        simulate_pair,batch_id,origin,destination,corrections
+                    )
+                    jobs.append((future,category,origin,destination))
+                    selected_categories.append(category)
+
+                if not jobs:
                     break
 
-                futures=[
-                    pool.submit(simulate_pair,batch_id,a,b,corrections)
-                    for a,b in pairs
-                ]
-                for future in as_completed(futures):
+                for future,category,origin,destination in jobs:
                     completed+=1
                     try:
                         ok=bool(future.result())
                     except Exception:
                         ok=False
+
                     if ok:
                         success+=1
+                        successful_by_category[category]+=1
+                        ok_origin=_loc_key(origin)
+                        ok_dest=_loc_key(destination)
+                        origin_usage[ok_origin]=origin_usage.get(ok_origin,0)+1
+                        destination_usage[ok_dest]=destination_usage.get(ok_dest,0)+1
+                        municipality=origin.get("municipality","")
+                        municipality_usage[municipality]=municipality_usage.get(municipality,0)+1
+                        if origin.get("zone")=="outside":
+                            outside_pickups+=1
                     else:
                         errors+=1
+                        # Dezelfde categorie moet opnieuw geprobeerd worden.
+                        pending.append(category)
+
                     _update_batch(
                         batch_id,
                         completed=completed,success=success,errors=errors,
                         stage="Routes simuleren",
                         message=(
-                            f"{success}/{count} geldige ritten • "
-                            f"{errors} afgekeurd • {completed} pogingen"
+                            f"{success}/{count} geldig • "
+                            f"🏥 {successful_by_category['hospital']}/{hospital_required} • "
+                            f"🏡 zorg {successful_by_category['care']}/{care_required} • "
+                            f"📍 overig {successful_by_category['general']}/{general_required} • "
+                            f"buitenring-ophaal {outside_pickups}"
                         )
                     )
 
-        if success>=count:
+        if not pending and success>=count:
             _update_batch(
                 batch_id,status="completed",stage="Klaar",
                 completed=completed,success=success,errors=errors,
-                message=f"{success} geldige trainingsritten klaar."
+                message=(
+                    f"{success} geldige ritten: "
+                    f"{successful_by_category['hospital']} ziekenhuis, "
+                    f"{successful_by_category['care']} zorginstelling, "
+                    f"{successful_by_category['general']} overig. "
+                    f"{outside_pickups} ophaallocaties uit buitenring."
+                )
             )
         elif success>0:
             _update_batch(
                 batch_id,status="partial",stage="Gedeeltelijk klaar",
                 completed=completed,success=success,errors=errors,
                 message=(
-                    f"{success}/{count} geldige ritten. "
-                    "Niet genoeg betrouwbare paren binnen de veiligheidsgrenzen."
+                    f"{success}/{count} geldig. Quotum nog open: "
+                    +", ".join(pending[:12])
                 )
             )
         else:
             _update_batch(
                 batch_id,status="failed",stage="Mislukt",
                 completed=completed,success=0,errors=errors,
-                message="Geen enkele betrouwbare trainingsrit kon worden gemaakt."
+                message="Geen geldige Regiovervoer-trainingsrit gemaakt."
             )
     except Exception as exc:
         _update_batch(
@@ -1128,6 +1274,7 @@ def run_batch(batch_id,count,seed):
             completed=completed,success=success,errors=errors,
             message=str(exc)[:500]
         )
+
 
 def create_batch(count,seed):
     count=max(1,min(200,int(count)))
