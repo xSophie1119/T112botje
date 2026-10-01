@@ -37,15 +37,15 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build V1 debug APK
+      - name: Build V1.1 debug APK
         run: gradle :app:assembleDebug --stacktrace
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk RoutePilot-V1-debug.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk RoutePilot-V1.1-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V1-debug-apk
-          path: routepilot/RoutePilot-V1-debug.apk
+          name: RoutePilot-V1.1-debug-apk
+          path: routepilot/RoutePilot-V1.1-debug.apk
           if-no-files-found: error
