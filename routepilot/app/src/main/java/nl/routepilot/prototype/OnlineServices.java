@@ -378,8 +378,8 @@ public final class OnlineServices {
 
             if (hasBusLaneSignal(tags)) {
                 String busLaneDetail = busLaneDetail(tags);
-                boolean exemptionHere = vehicle.busLaneExemption
-                        && MunicipalityService.isInTilburg(lat, lon);
+                boolean exemptionHere = RoutingRules.busLaneExemptionAllowed(
+                        vehicle.busLaneExemption, MunicipalityService.isInTilburg(lat, lon));
                 if (exemptionHere) {
                     addUnique(out, seen, new Restriction(
                             lat, lon, "BUSBAAN", busLaneDetail,
