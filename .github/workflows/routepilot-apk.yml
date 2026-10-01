@@ -91,6 +91,31 @@ jobs:
           print('simulator async smoke test ok')
           PY
 
+      - name: Live PDOK + OSRM smoke test
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import importlib.util, pathlib, tempfile, os, random
+          p = pathlib.Path('routepilot-simulator/server.py')
+          os.environ['ROUTEPILOT_SIM_DB'] = str(pathlib.Path(tempfile.gettempdir()) / 'routepilot-sim-live.sqlite3')
+          spec = importlib.util.spec_from_file_location('rp_live', p)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          status = mod.source_status()
+          print(status)
+          assert status['pdok']['ok'], status['pdok']
+          assert status['osrm']['ok'], status['osrm']
+          locations = mod.build_training_location_pool(random.Random(32026), 2)
+          assert len(locations) >= 2
+          a = locations[0]
+          b = next(x for x in locations[1:] if mod.haversine_m(a[1],a[2],x[1],x[2]) > 700)
+          route = mod.cached_osrm_route(a[1],a[2],b[1],b[2])
+          assert route.get('code') == 'Ok'
+          assert len(route.get('waypoints') or []) == 2
+          assert route.get('routes')
+          print('LIVE OK:', a[0], '->', b[0], round(route['routes'][0]['distance']), 'm')
+          PY
+
 
   simulator-package:
     runs-on: ubuntu-latest
