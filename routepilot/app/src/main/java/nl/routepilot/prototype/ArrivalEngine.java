@@ -47,6 +47,7 @@ public final class ArrivalEngine {
         Result out = new Result();
         RoutePilotStore.LocationProfile profile =
                 RoutePilotStore.findProfile(context, destination.lat, destination.lon);
+        VehicleProfile vehicle = VehicleProfile.load(context);
 
         if (profile != null && profile.hasStopPoint) {
             out.recommendedStop = new GeoPoint(profile.stopLat, profile.stopLon);
@@ -82,7 +83,9 @@ public final class ArrivalEngine {
             out.liftMessage = "Fietsinfrastructuur nabij de stopzone: achterlift extra controleren.";
             out.warnings.add("Controleer vóór uitklappen van de lift altijd fietspad, verkeer en vrije ruimte.");
         } else {
-            out.liftMessage = "Achterliftruimte nog niet bevestigd op deze locatie.";
+            out.liftMessage = "Achterliftruimte nog niet bevestigd. RoutePilot rekent conservatief met "
+                    + String.format(java.util.Locale.NL, "%.1f m", vehicle.rearLiftClearanceM)
+                    + " vrije ruimte achter de bus.";
         }
 
         if (access != null) {
