@@ -545,7 +545,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         String side = currentAnalysis.destinationOnRight
                 ? "rechterdeur aan ingangzijde ✓"
-                : "ingangzijde rechts niet bevestigd ⚠";
+                : "normale aankomstzijde • rechterdeurvoorkeur niet toegepast";
         String meta = shortLabel(currentDestination.label) + " • " + side;
         if (!currentRoute.selectionNote.isEmpty()) meta += "\n" + currentRoute.selectionNote;
         if (note != null && !note.isEmpty()) meta += "\n" + note;
@@ -883,7 +883,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         if (currentRoute.liveClosureCount() > 0) navStatus.setText("🚧 AFSLUITING OP ROUTE");
         else if (currentRoute.criticalCount() > 0) navStatus.setText("⚠ VOERTUIGWAARSCHUWING");
-        else if (!currentAnalysis.destinationOnRight) navStatus.setText("🚪 AANKOMSTZIJDE CONTROLEREN");
+        else if (!currentAnalysis.destinationOnRight) navStatus.setText("NAVIGATIE ACTIEF • normale aankomstzijde");
 
         speak("Nieuwe route geladen."
                 + (currentAnalysis.destinationOnRight ? " Rechterdeur aan ingangzijde ingesteld." : ""));
@@ -908,8 +908,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         stopNavigation(true);
 
         String side = currentAnalysis.destinationOnRight
-                ? "✓ RoutePilot heeft de rechterzijde als ingangzijde aangehouden."
-                : "⚠ RoutePilot kon de ingangzijde niet betrouwbaar rechts bevestigen. Controleer vóór uitstappen.";
+                ? "✓ Rechterdeur aan de ingangzijde gebruikt."
+                : "Rechterdeurvoorkeur is hier niet toegepast omdat de normale/legale aanrijrichting leidend is.";
 
         String lift = vehicle.rearLift
                 ? "\n\nAchterlift:\n• Houd voldoende vrije ruimte achter de bus."
