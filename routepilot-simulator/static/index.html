@@ -37,8 +37,8 @@
             </select>
           </label>
           <label class="field grow">
-            <span>Seed</span>
-            <input id="seed" type="number" value="32026">
+            <span>Seed (optioneel)</span>
+            <input id="seed" type="number" placeholder="leeg = elke keer random">
           </label>
         </div>
         <button id="simulateBtn" class="primary wide">▶ Simuleer WMO-ritten</button>
@@ -50,7 +50,7 @@
           <div class="batch-progress-track"><div id="batchProgressBar"></div></div>
           <div id="batchCounts" class="batch-counts">0 geldig • 0 afgekeurd</div>
         </div>
-        <div id="simStatus" class="hint">PDOK/BAG-bestemmingen en OSRM-routes worden lokaal gecachet.</div>
+        <div id="simStatus" class="hint">25 ritten = minimaal 5 ziekenhuis + 5 zorginstelling. Lege seed geeft iedere batch nieuwe willekeurige adressen.</div>
         <button id="sourceCheckBtn" class="ghost wide source-check">🩺 Controleer databronnen</button>
         <div id="sourceStatus" class="source-status hidden"></div>
       </section>
@@ -95,7 +95,7 @@
       <div id="emptyState" class="empty-state">
         <div class="empty-icon">🧪</div>
         <h2>Kies een simulatie</h2>
-        <p>Of genereer eerst een batch virtuele WMO-ritten door Tilburg.</p>
+        <p>Of genereer een batch virtuele WMO-ritten door het volledige Regiovervoer Midden-Brabant-gebied.</p>
       </div>
 
       <aside id="detailPanel" class="detail-panel hidden">
@@ -112,6 +112,11 @@
           <div><span>Rijtijd</span><strong id="detailDuration">—</strong></div>
           <div><span>Correcties geraakt</span><strong id="detailHits">—</strong></div>
           <div><span>Route-score</span><strong id="detailScore">—</strong></div>
+        </div>
+
+        <div class="endpoint-grid">
+          <div><span>Ritsoort</span><strong id="detailCategory">—</strong></div>
+          <div><span>Gebiedsregel</span><strong id="detailRing">—</strong></div>
         </div>
 
         <div class="section-title">Doellocatie vs. route-stop</div>
