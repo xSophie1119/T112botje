@@ -45,6 +45,18 @@ public final class RouteAnalysis {
         r.destinationOnRight=isDestinationOnRight(route.points,destination.lat,destination.lon);
 
         if(closures>0){score-=Math.min(80,closures*40);r.reasons.add(closures+" actuele afsluiting(en)");}
+        int liveHindrance=0;
+        for(LiveTrafficService.TrafficEvent e:route.trafficEvents){
+            if(e.closure)continue;
+            String t=e.type==null?"":e.type.toUpperCase(Locale.ROOT);
+            if(t.contains("ONGEVAL")||t.contains("WERKZAAMHEDEN")
+                    ||t.contains("OBSTAKEL")||t.contains("VOERTUIG")
+                    ||t.contains("VERKEERSHINDER")||t.contains("WEGTOESTAND")) liveHindrance++;
+        }
+        if(liveHindrance>0){
+            score-=Math.min(24,liveHindrance*6);
+            r.reasons.add(liveHindrance+" actuele hinder-/incidentmelding(en)");
+        }
         if(critical>0){score-=Math.min(70,critical*24);r.reasons.add(critical+" kritieke voertuigbeperking(en)");}
         if(caution>0){score-=Math.min(30,caution*7);r.reasons.add(caution+" voertuig-aandachtspunt(en)");}
         if(r.narrowSignals>0){score-=Math.min(24,r.narrowSignals*5);r.reasons.add(r.narrowSignals+" smalle/krappe weg-signaal(en)");}
