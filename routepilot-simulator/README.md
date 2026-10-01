@@ -112,3 +112,19 @@ Open daarna in RoutePilot **⚙ Voertuigprofiel → Simulator / Correctieportaal
 ## Trainingspunten en snelwegen
 
 Vanaf simulator **3.3.1** worden trainingsankers eerst naar een geschikte lokale autoweg gesnapt. Snelwegen, snelwegopritten en trunk/trunk-link-wegen zijn uitgesloten als start- of eindpunt. Daarna gebruikt OSRM een kleine snapradius, zodat een wijk- of zorganker niet alsnog naar een verderop gelegen snelweg kan springen.
+
+
+## Exacte trainingsbestemmingen (3.3.2)
+
+De simulator gebruikt niet langer wijkankers als zichtbare eindbestemming. De wijkpunten dienen alleen nog om concrete publieke adressen en zorg-/maatschappelijke POI's te ontdekken.
+
+Per trainingsrit worden apart opgeslagen en weergegeven:
+
+- de echte doellocatie;
+- de lokale weg waarop RoutePilot probeert te stoppen;
+- het werkelijke OSRM-waypoint waar de route eindigt;
+- de afstand tussen doellocatie en route-stop.
+
+In de kaartreview is **paars** de echte bestemming en **groen** het werkelijke route-eindpunt. Als de router meer dan 95 meter van de concrete bestemming eindigt, wordt het scenario afgekeurd in plaats van stilzwijgend naar een andere locatie te verschuiven.
+
+Oude scenario's die nog met grove wijkankers zijn gemaakt worden als legacy behandeld en verdwijnen uit de normale trainingslijst. Opgeslagen RoutePilot-correcties blijven behouden.
