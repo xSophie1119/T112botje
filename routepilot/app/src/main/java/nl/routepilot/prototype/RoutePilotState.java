@@ -72,6 +72,24 @@ public final class RoutePilotState {
                 .putLong("lon",Double.doubleToRawLongBits(lon)).apply();
     }
 
+    public static void updateWmo(Context c, String phase, long waitRemainingMs,
+                                 boolean waitExpired) {
+        c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
+                .putString("wmoPhase",phase==null?"":phase)
+                .putLong("wmoWaitRemaining",waitRemainingMs)
+                .putBoolean("wmoWaitExpired",waitExpired)
+                .apply();
+    }
+
+    public static void updateContext(Context c, String lookAhead, String arrival,
+                                     String confidence) {
+        c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
+                .putString("lookAhead",lookAhead==null?"":lookAhead)
+                .putString("arrival",arrival==null?"":arrival)
+                .putString("confidence",confidence==null?"":confidence)
+                .apply();
+    }
+
     public static Snapshot get(Context c){
         SharedPreferences p=c.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
         Snapshot s=new Snapshot();
@@ -79,6 +97,12 @@ public final class RoutePilotState {
         s.warning=p.getString("warning","");s.etaMs=p.getLong("eta",0);
         s.speedLimit=p.getInt("speedLimit",-1);s.safetyScore=p.getInt("safetyScore",0);
         s.destination=p.getString("destination","");
+        s.wmoPhase=p.getString("wmoPhase","");
+        s.wmoWaitRemainingMs=p.getLong("wmoWaitRemaining",0L);
+        s.wmoWaitExpired=p.getBoolean("wmoWaitExpired",false);
+        s.lookAhead=p.getString("lookAhead","");
+        s.arrival=p.getString("arrival","");
+        s.confidence=p.getString("confidence","");
         s.lat=Double.longBitsToDouble(p.getLong("lat",Double.doubleToRawLongBits(0)));
         s.lon=Double.longBitsToDouble(p.getLong("lon",Double.doubleToRawLongBits(0)));
         s.stepDistanceM=Double.longBitsToDouble(p.getLong("stepDistance",Double.doubleToRawLongBits(0)));
@@ -87,8 +111,14 @@ public final class RoutePilotState {
     }
 
     public static class Snapshot{
-        public boolean active; public String instruction,warning,destination;
-        public double stepDistanceM,remainingM; public long etaMs;
-        public int speedLimit,safetyScore; public double lat,lon;
+        public boolean active;
+        public String instruction,warning,destination;
+        public String wmoPhase,lookAhead,arrival,confidence;
+        public boolean wmoWaitExpired;
+        public long wmoWaitRemainingMs;
+        public double stepDistanceM,remainingM;
+        public long etaMs;
+        public int speedLimit,safetyScore;
+        public double lat,lon;
     }
 }
