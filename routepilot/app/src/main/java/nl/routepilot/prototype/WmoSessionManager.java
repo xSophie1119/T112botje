@@ -70,6 +70,7 @@ public final class WmoSessionManager {
         public String dropoffLabel;
         public String result;
         public long waitMs;
+        public long dropoffServiceMs;
     }
 
     private static final String PREFS = "routepilot_wmo";
@@ -212,6 +213,7 @@ public final class WmoSessionManager {
             h.dropoffLabel = o.optString("dropoffLabel", "");
             h.result = o.optString("result", "");
             h.waitMs = o.optLong("waitMs", 0L);
+            h.dropoffServiceMs = o.optLong("dropoffServiceMs", 0L);
             out.add(h);
         }
         return out;
@@ -224,6 +226,18 @@ public final class WmoSessionManager {
         for (HistoryItem h : items) {
             if (h.waitMs <= 0L || !"COMPLETED".equals(h.result)) continue;
             total += h.waitMs;
+            n++;
+        }
+        return n == 0 ? 0.0 : (total / 1000.0) / n;
+    }
+
+    public static synchronized double averageDropoffSeconds(Context c) {
+        List<HistoryItem> items = history(c);
+        long total = 0L;
+        int n = 0;
+        for (HistoryItem h : items) {
+            if (h.dropoffServiceMs <= 0L || !"COMPLETED".equals(h.result)) continue;
+            total += h.dropoffServiceMs;
             n++;
         }
         return n == 0 ? 0.0 : (total / 1000.0) / n;
@@ -262,6 +276,9 @@ public final class WmoSessionManager {
             o.put("dropoffLabel", s.dropoffLabel);
             o.put("result", result);
             o.put("waitMs", s.waitedMs());
+            o.put("dropoffServiceMs",
+                    s.dropoffArrivedAt > 0 && s.completedAt >= s.dropoffArrivedAt
+                            ? s.completedAt - s.dropoffArrivedAt : 0L);
             arr.put(o);
             while (arr.length() > 150) arr.remove(0);
             c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
