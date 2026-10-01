@@ -17,8 +17,8 @@ import java.util.zip.GZIPInputStream;
 
 public final class LiveTrafficService {
 
-    private static final String CLOSURES_URL =
-            "https://opendata.ndw.nu/tijdelijke_verkeersmaatregelen_afsluitingen.xml.gz";
+    private static final String LIVE_URL =
+            "https://opendata.ndw.nu/actueel_beeld.xml.gz";
     private static final long CACHE_MS = 120_000L;
 
     private static final Object LOCK = new Object();
@@ -52,7 +52,7 @@ public final class LiveTrafficService {
 
     public static List<TrafficEvent> eventsNearRoute(List<GeoPoint> routePoints,
                                                      double corridorMeters) throws Exception {
-        List<TrafficEvent> all = loadCurrentClosures();
+        List<TrafficEvent> all = loadCurrentTraffic();
         List<TrafficEvent> out = new ArrayList<>();
         if (routePoints == null || routePoints.isEmpty()) return out;
 
@@ -65,14 +65,14 @@ public final class LiveTrafficService {
         return out;
     }
 
-    private static List<TrafficEvent> loadCurrentClosures() throws Exception {
+    private static List<TrafficEvent> loadCurrentTraffic() throws Exception {
         synchronized (LOCK) {
             if (!cached.isEmpty() && System.currentTimeMillis() - cachedAt < CACHE_MS) {
                 return new ArrayList<>(cached);
             }
         }
 
-        HttpURLConnection con = (HttpURLConnection) new URL(CLOSURES_URL).openConnection();
+        HttpURLConnection con = (HttpURLConnection) new URL(LIVE_URL).openConnection();
         con.setConnectTimeout(12_000);
         con.setReadTimeout(20_000);
         con.setRequestProperty("User-Agent", OnlineServices.USER_AGENT);
@@ -81,7 +81,7 @@ public final class LiveTrafficService {
         int code = con.getResponseCode();
         if (code < 200 || code >= 300) {
             con.disconnect();
-            throw new IllegalStateException("NDW afsluitingen gaf HTTP " + code);
+            throw new IllegalStateException("NDW Actueel beeld gaf HTTP " + code);
         }
 
         List<TrafficEvent> parsed;
@@ -109,7 +109,8 @@ public final class LiveTrafficService {
         String currentTag = "";
         double lat = Double.NaN;
         double lon = Double.NaN;
-        String type = "AFSLUITING";
+        String type = "VERKEERSINFO";
+        String recordClass = "";
         String description = "";
         String validityStatus = "";
         String startTime = "";
@@ -125,7 +126,8 @@ public final class LiveTrafficService {
                     inRecord = true;
                     lat = Double.NaN;
                     lon = Double.NaN;
-                    type = "AFSLUITING";
+                    type = "VERKEERSINFO";
+                    recordClass = "";
                     description = "";
                     validityStatus = "";
                     startTime = "";
@@ -135,7 +137,8 @@ public final class LiveTrafficService {
                     String xsiType = parser.getAttributeValue(
                             "http://www.w3.org/2001/XMLSchema-instance", "type");
                     if (xsiType != null && !xsiType.trim().isEmpty()) {
-                        type = cleanType(xsiType);
+                        recordClass = cleanType(xsiType);
+                        type = categoryFor(recordClass);
                     }
                 }
             } else if (eventType == XmlPullParser.TEXT && inRecord) {
@@ -156,7 +159,20 @@ public final class LiveTrafficService {
                     } else if (tag.contains("managementtype")
                             || tag.contains("closuretype")
                             || tag.contains("trafficmanagementtype")) {
-                        closureSignal = true;
+                        String pretty = prettify(value);
+                        String lower = value.toLowerCase(Locale.ROOT);
+                        if (lower.contains("closed")
+                                || lower.contains("closure")
+                                || lower.contains("blocked")
+                                || lower.contains("block")) {
+                            closureSignal = true;
+                        }
+                        if (description.isEmpty()) description = pretty;
+                    } else if (tag.contains("accidenttype")
+                            || tag.contains("obstructiontype")
+                            || tag.contains("roadworkstype")
+                            || tag.contains("abnormaltraffictype")
+                            || tag.contains("weathertype")) {
                         if (description.isEmpty()) description = prettify(value);
                     } else if ("value".equals(tag) && isUsefulText(value)) {
                         if (description.isEmpty()) description = value;
@@ -173,15 +189,17 @@ public final class LiveTrafficService {
                         }
 
                         boolean closure = closureSignal
-                                || type.toLowerCase(Locale.ROOT).contains("management")
-                                || type.toLowerCase(Locale.ROOT).contains("closure");
+                                || desc.toLowerCase(Locale.ROOT).contains("afgesloten")
+                                || desc.toLowerCase(Locale.ROOT).contains("gesloten");
+
+                        if (closure) type = "ACTUELE AFSLUITING";
 
                         out.add(new TrafficEvent(
                                 lat, lon,
-                                "ACTUELE AFSLUITING",
+                                type,
                                 desc,
                                 closure,
-                                "NDW"
+                                "NDW Actueel"
                         ));
                     }
                     inRecord = false;
@@ -217,6 +235,24 @@ public final class LiveTrafficService {
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private static String categoryFor(String recordClass) {
+        String v = recordClass == null ? "" : recordClass.toLowerCase(Locale.ROOT);
+        if (v.contains("accident")) return "ONGEVAL";
+        if (v.contains("roadworks") || v.contains("maintenance")) return "WERKZAAMHEDEN";
+        if (v.contains("abnormaltraffic")) return "VERKEERSHINDER";
+        if (v.contains("poorroad") || v.contains("roadcondition")) return "WEGTOESTAND";
+        if (v.contains("weather")) return "WEER";
+        if (v.contains("environmentalobstruction")) return "OBSTAKEL";
+        if (v.contains("authorityoperation")) return "HULPDIENST/BEHEER";
+        if (v.contains("vehicleobstruction")) return "VOERTUIG OP WEG";
+        if (v.contains("animalpresence")) return "DIER OP WEG";
+        if (v.contains("generalnetworkmanagement")
+                || v.contains("roadorcarriagewayorlanemanagement")) {
+            return "VERKEERSMAATREGEL";
+        }
+        return "VERKEERSINFO";
     }
 
     private static String local(String name) {
