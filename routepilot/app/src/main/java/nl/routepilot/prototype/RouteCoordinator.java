@@ -6,8 +6,13 @@ import android.location.Location;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class RouteCoordinator {
+    private static final ExecutorService SCAN_POOL = Executors.newFixedThreadPool(7);
     private RouteCoordinator(){}
 
     public static final class Prepared {
@@ -20,20 +25,42 @@ public final class RouteCoordinator {
         public DestinationAccessService.Result destinationAccess;
         public RouteConfidence.Result confidence;
         public ArrivalEngine.Result arrival;
+        public long preparationMs=0L;
         public String note="";
     }
 
     public static Prepared prepare(Context context, Location start,
                                    OnlineServices.SearchResult destination,
                                    VehicleProfile vehicle) throws Exception {
+        long started=System.currentTimeMillis();
         List<OnlineServices.RouteResult> candidates=OnlineServices.routeCandidates(
                 start.getLatitude(),start.getLongitude(),destination.lat,destination.lon);
+        if(candidates.isEmpty()) throw new IllegalArgumentException("Geen bruikbare route gevonden.");
+
         List<Prepared> prepared=new ArrayList<>();
 
-        for(int i=0;i<candidates.size() && i<3;i++){
-            prepared.add(enrich(context,candidates.get(i),destination,vehicle));
+        // Snel pad: scan eerst alleen de primaire route, maar alle databronnen parallel.
+        Prepared primary=enrich(context,candidates.get(0),destination,vehicle,null);
+        prepared.add(primary);
+
+        // Alleen diep vergelijken wanneer de primaire route daar aanleiding toe geeft.
+        boolean needAlternatives = hardScore(primary)>0
+                || primary.analysis.score<82
+                || primary.analysis.learnedPenalty>0
+                || primary.analysis.uTurns>0;
+
+        if(needAlternatives && candidates.size()>1){
+            DestinationAccessService.Result sharedAccess=primary.destinationAccess;
+            List<CompletableFuture<Prepared>> futures=new ArrayList<>();
+            for(int i=1;i<candidates.size() && i<3;i++){
+                final OnlineServices.RouteResult candidate=candidates.get(i);
+                futures.add(CompletableFuture.supplyAsync(
+                        () -> enrich(context,candidate,destination,vehicle,sharedAccess),SCAN_POOL));
+            }
+            for(CompletableFuture<Prepared> future:futures){
+                try{prepared.add(future.get());}catch(Exception ignored){}
+            }
         }
-        if(prepared.isEmpty()) throw new IllegalArgumentException("Geen bruikbare route gevonden.");
 
         Prepared selected=select(prepared);
 
@@ -87,56 +114,74 @@ public final class RouteCoordinator {
         selected.confidence=RouteConfidence.calculate(context,selected,destination);
         selected.arrival=ArrivalEngine.evaluate(context,destination,selected.route,
                 selected.analysis,selected.destinationAccess);
+        selected.preparationMs=System.currentTimeMillis()-started;
         return selected;
     }
 
     public static Prepared enrich(Context context, OnlineServices.RouteResult route,
                                   OnlineServices.SearchResult destination,
                                   VehicleProfile vehicle) {
+        return enrich(context,route,destination,vehicle,null);
+    }
+
+    private static Prepared enrich(Context context, OnlineServices.RouteResult route,
+                                   OnlineServices.SearchResult destination,
+                                   VehicleProfile vehicle,
+                                   DestinationAccessService.Result sharedAccess) {
         Prepared p=new Prepared();
         p.route=route;
 
-        try{
-            route.restrictions=OnlineServices.scanRestrictions(route,vehicle);
-        }catch(Exception e){p.vehicleScanOk=false;}
+        CompletableFuture<List<OnlineServices.Restriction>> restrictions=
+                async(() -> OnlineServices.scanRestrictions(route,vehicle));
+        CompletableFuture<List<LiveTrafficService.TrafficEvent>> traffic=
+                async(() -> LiveTrafficService.eventsNearRoute(route.points));
+        CompletableFuture<List<RoadDataService.Sign>> signs=
+                async(() -> RoadDataService.signsNearRoute(route.points));
+        CompletableFuture<List<OfficialSpeedService.SpeedPoint>> speeds=
+                async(() -> OfficialSpeedService.loadForRoute(route.points));
+        CompletableFuture<List<BridgeOpeningService.Event>> bridges=
+                async(() -> BridgeOpeningService.conflictsForRoute(route));
+        CompletableFuture<List<TemporarySpeedService.Limit>> tempSpeeds=
+                async(() -> TemporarySpeedService.limitsForRoute(route.points));
+        CompletableFuture<DestinationAccessService.Result> access=
+                sharedAccess!=null
+                        ? CompletableFuture.completedFuture(sharedAccess)
+                        : async(() -> DestinationAccessService.scan(destination,route.points));
+
+        try{route.restrictions=restrictions.get();}
+        catch(Exception e){p.vehicleScanOk=false;route.restrictions=new ArrayList<>();}
+
+        try{route.trafficEvents=traffic.get();}
+        catch(Exception e){p.trafficScanOk=false;route.trafficEvents=new ArrayList<>();}
 
         try{
-            route.trafficEvents=LiveTrafficService.eventsNearRoute(route.points);
-        }catch(Exception e){p.trafficScanOk=false;}
-
-        try{
-            route.roadSigns=RoadDataService.signsNearRoute(route.points);
+            route.roadSigns=signs.get();
             applyFormalSignRestrictions(route,vehicle);
-        }catch(Exception e){p.signScanOk=false;}
+        }catch(Exception e){p.signScanOk=false;route.roadSigns=new ArrayList<>();}
 
-        try{
-            route.officialSpeeds=OfficialSpeedService.loadForRoute(route.points);
-        }catch(Exception ignored){
-            route.officialSpeeds=new ArrayList<>();
-        }
+        try{route.officialSpeeds=speeds.get();}
+        catch(Exception ignored){route.officialSpeeds=new ArrayList<>();}
 
-        try{
-            route.bridgeEvents=BridgeOpeningService.conflictsForRoute(route);
-        }catch(Exception ignored){
-            route.bridgeEvents=new ArrayList<>();
-        }
+        try{route.bridgeEvents=bridges.get();}
+        catch(Exception ignored){route.bridgeEvents=new ArrayList<>();}
 
-        try{
-            route.temporarySpeeds=TemporarySpeedService.limitsForRoute(route.points);
-        }catch(Exception ignored){
-            route.temporarySpeeds=new ArrayList<>();
-        }
+        try{route.temporarySpeeds=tempSpeeds.get();}
+        catch(Exception ignored){route.temporarySpeeds=new ArrayList<>();}
 
-        try{
-            p.destinationAccess=DestinationAccessService.scan(destination,route.points);
-        }catch(Exception ignored){
-            p.destinationAccess=new DestinationAccessService.Result();
-        }
+        try{p.destinationAccess=access.get();}
+        catch(Exception ignored){p.destinationAccess=new DestinationAccessService.Result();}
 
         p.analysis=RouteAnalysis.analyze(context,route,destination);
         p.confidence=RouteConfidence.calculate(context,p,destination);
         p.arrival=ArrivalEngine.evaluate(context,destination,route,p.analysis,p.destinationAccess);
         return p;
+    }
+
+    private static <T> CompletableFuture<T> async(Callable<T> task){
+        return CompletableFuture.supplyAsync(() -> {
+            try{return task.call();}
+            catch(Exception e){throw new RuntimeException(e);}
+        },SCAN_POOL);
     }
 
     private static Prepared select(List<Prepared> all){
@@ -184,17 +229,27 @@ public final class RouteCoordinator {
         double[] hazard=firstHardPoint(base);
         if(hazard==null)return null;
 
-        Prepared best=null;
+        List<CompletableFuture<Prepared>> futures=new ArrayList<>();
         for(int side:new int[]{-1,1}){
-            try{
-                double[] via=detourPoint(base.route,hazard[0],hazard[1],side,360.0);
-                OnlineServices.RouteResult r=OnlineServices.routeViaWaypoint(
-                        start.getLatitude(),start.getLongitude(),
-                        via[0],via[1],destination.lat,destination.lon);
-                if(r.distanceMeters>base.route.distanceMeters*1.35)continue;
-                if(r.durationSeconds>base.route.durationSeconds+600.0)continue;
+            final int detourSide=side;
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                try{
+                    double[] via=detourPoint(base.route,hazard[0],hazard[1],detourSide,360.0);
+                    OnlineServices.RouteResult r=OnlineServices.routeViaWaypoint(
+                            start.getLatitude(),start.getLongitude(),
+                            via[0],via[1],destination.lat,destination.lon);
+                    if(r.distanceMeters>base.route.distanceMeters*1.35)return null;
+                    if(r.durationSeconds>base.route.durationSeconds+600.0)return null;
+                    return enrich(context,r,destination,vehicle,base.destinationAccess);
+                }catch(Exception ignored){return null;}
+            },SCAN_POOL));
+        }
 
-                Prepared p=enrich(context,r,destination,vehicle);
+        Prepared best=null;
+        for(CompletableFuture<Prepared> future:futures){
+            try{
+                Prepared p=future.get();
+                if(p==null)continue;
                 if(best==null || hardScore(p)<hardScore(best)
                         || (hardScore(p)==hardScore(best)
                         && p.analysis.score>best.analysis.score)){
