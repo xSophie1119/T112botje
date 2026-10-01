@@ -34,7 +34,7 @@ public final class RouteCoordinator {
                                    VehicleProfile vehicle) throws Exception {
         long started=System.currentTimeMillis();
         List<OnlineServices.RouteResult> candidates=OnlineServices.routeCandidates(
-                start.getLatitude(),start.getLongitude(),destination.lat,destination.lon);
+                context,start.getLatitude(),start.getLongitude(),destination,vehicle);
         if(candidates.isEmpty()) throw new IllegalArgumentException("Geen bruikbare route gevonden.");
 
         List<Prepared> prepared=new ArrayList<>();
@@ -140,6 +140,11 @@ public final class RouteCoordinator {
                 async(() -> RoadDataService.signsNearRoute(route.points));
         CompletableFuture<List<BridgeOpeningService.Event>> bridges=
                 async(() -> BridgeOpeningService.conflictsForRoute(route));
+        RoutingProviderSettings routingSettings=RoutingProviderSettings.load(context);
+        CompletableFuture<NdwAccessibilityService.Result> ndwAccessibility=
+                routingSettings.ndwAccessibility
+                        ? async(() -> NdwAccessibilityService.validate(route,destination,vehicle))
+                        : CompletableFuture.completedFuture(null);
         CompletableFuture<DestinationAccessService.Result> access=
                 sharedAccess!=null
                         ? CompletableFuture.completedFuture(sharedAccess)
@@ -158,6 +163,18 @@ public final class RouteCoordinator {
 
         try{route.bridgeEvents=bridges.get();}
         catch(Exception ignored){route.bridgeEvents=new ArrayList<>();}
+
+        try{
+            NdwAccessibilityService.Result n=ndwAccessibility.get();
+            if(n!=null){
+                route.ndwAccessibilityChecked=n.checked;
+                route.ndwAccessibilityHardHits=n.restrictions.size();
+                route.ndwAccessibilityReasons.addAll(n.reasons);
+                route.restrictions.addAll(n.restrictions);
+            }
+        }catch(Exception ignored){
+            route.ndwAccessibilityChecked=false;
+        }
 
         route.officialSpeeds=new ArrayList<>();
         route.temporarySpeeds=new ArrayList<>();
@@ -193,8 +210,10 @@ public final class RouteCoordinator {
     private static Prepared select(List<Prepared> all){
         all.sort(new Comparator<Prepared>(){
             @Override public int compare(Prepared a,Prepared b){
-                int aIllegal=a.route.liveClosureCount()*100+a.route.criticalCount()*20;
-                int bIllegal=b.route.liveClosureCount()*100+b.route.criticalCount()*20;
+                int aIllegal=a.route.liveClosureCount()*100+a.route.criticalCount()*20
+                        +a.route.providerCriticalNotices*80;
+                int bIllegal=b.route.liveClosureCount()*100+b.route.criticalCount()*20
+                        +b.route.providerCriticalNotices*80;
                 if(aIllegal!=bIllegal)return Integer.compare(aIllegal,bIllegal);
 
                 if(a.route.bridgeConflictCount()!=b.route.bridgeConflictCount())
@@ -271,6 +290,7 @@ public final class RouteCoordinator {
     private static int hardScore(Prepared p){
         if(p==null||p.route==null)return Integer.MAX_VALUE;
         return p.route.liveClosureCount()*100+p.route.criticalCount()*20
+                +p.route.providerCriticalNotices*80
                 +p.route.bridgeConflictCount()*12
                 +(p.analysis==null?0:p.analysis.portalHardHits*30);
     }
