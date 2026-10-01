@@ -13,10 +13,24 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 public final class DestinationAccessService {
+    private static final long CACHE_MS=10*60*1000L;
+    private static final Map<String,Cached> CACHE=
+            new LinkedHashMap<String,Cached>(40,0.75f,true){
+                @Override protected boolean removeEldestEntry(Map.Entry<String,Cached> e){
+                    return size()>40;
+                }
+            };
+
+    private static final class Cached{
+        final long at; final Result result;
+        Cached(long at,Result result){this.at=at;this.result=copy(result);}
+    }
 
     public static final class Result {
         public boolean scanOk = false;
@@ -57,6 +71,16 @@ public final class DestinationAccessService {
                               List<GeoPoint> route) {
         Result out = new Result();
         if (destination == null) return out;
+
+        String cacheKey=String.format(Locale.US,"%.5f,%.5f",destination.lat,destination.lon);
+        synchronized(CACHE){
+            Cached hit=CACHE.get(cacheKey);
+            if(hit!=null&&System.currentTimeMillis()-hit.at<CACHE_MS){
+                out=copy(hit.result);
+                applyFallback(out,route);
+                return out;
+            }
+        }
 
         try {
             String q = "[out:json][timeout:16];("
@@ -139,16 +163,38 @@ public final class DestinationAccessService {
             out.notes.add("Bestemmingsscan tijdelijk niet beschikbaar.");
         }
 
+        synchronized(CACHE){
+            CACHE.put(cacheKey,new Cached(System.currentTimeMillis(),out));
+        }
+        applyFallback(out,route);
+        return out;
+    }
+
+    private static void applyFallback(Result out,List<GeoPoint> route){
+        out.fallbackStop=null;
         if (route != null && route.size() > 2
                 && (out.deadEndSignal || out.barrierNearby)
                 && out.turningOptions == 0) {
             out.fallbackStop = pointBeforeDestination(route, 85.0);
-            if (out.fallbackStop != null) {
+            if (out.fallbackStop != null
+                    && !out.notes.contains("Fallback-stoppunt ongeveer 85 m vóór het route-einde berekend.")) {
                 out.notes.add("Fallback-stoppunt ongeveer 85 m vóór het route-einde berekend.");
             }
         }
+    }
 
-        return out;
+    private static Result copy(Result src){
+        Result r=new Result();
+        r.scanOk=src.scanOk;
+        r.oneWayNearby=src.oneWayNearby;
+        r.deadEndSignal=src.deadEndSignal;
+        r.cyclewayNearby=src.cyclewayNearby;
+        r.parkingOpportunityNearby=src.parkingOpportunityNearby;
+        r.barrierNearby=src.barrierNearby;
+        r.turningOptions=src.turningOptions;
+        r.narrowSignals=src.narrowSignals;
+        r.notes.addAll(src.notes);
+        return r;
     }
 
     private static GeoPoint pointBeforeDestination(List<GeoPoint> route, double meters) {
