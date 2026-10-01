@@ -9,6 +9,10 @@ async function openScenario(id){
     el('detailDuration').textContent=mins(x.duration_s);
     el('detailHits').textContent=x.correction_hits;
     el('detailScore').textContent=Math.round(x.score);
+    el('detailCategory').textContent=x.trip_category==='hospital'
+      ?'🏥 Ziekenhuis':(x.trip_category==='care'?'🏡 Zorginstelling':'📍 Overige bestemming');
+    el('detailRing').textContent=(x.ring_rule||'—')
+      +' · '+(x.origin_municipality||'?')+' → '+(x.destination_municipality||'?');
     el('detailTarget').textContent=x.destination_name||'—';
     el('detailStop').textContent=(x.destination_stop_name||'route-stoppunt')
       +' · '+Number(x.destination_lat||0).toFixed(6)+', '+Number(x.destination_lon||0).toFixed(6);
@@ -24,6 +28,7 @@ function renderAlternatives(){
 }
 function clearRouteLayers(){
   state.altLayers.forEach(l=>l.remove());state.altLayers=[];
+  state.endpointLayers.forEach(l=>l.remove());state.endpointLayers=[];
   if(state.routeLayer){state.routeLayer.remove();state.routeLayer=null}
 }
 function drawSelectedAlternative(index,fit=false){
@@ -147,7 +152,7 @@ el('simulateBtn').onclick=async()=>{
       method:'POST',
       body:JSON.stringify({
         count:Number(el('count').value),
-        seed:Number(el('seed').value)
+        seed:el('seed').value.trim()==='' ? Date.now() : Number(el('seed').value)
       })
     });
     await pollBatch(x.batch_id);
