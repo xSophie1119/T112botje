@@ -183,7 +183,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         buildWmoPanel(panel);
 
         TextView disclaimer = text(
-                "RoutePilot V3.1 debug • MapLibre/OpenFreeMap + OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
+                "RoutePilot V3.2 debug • MapLibre/OpenFreeMap + OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
                 10, MUTED, Typeface.NORMAL);
         disclaimer.setGravity(Gravity.CENTER);
         disclaimer.setPadding(0, dp(12), 0, 0);
@@ -197,6 +197,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         requestNotificationPermissionIfNeeded();
         handleNavigationIntent(getIntent());
         updateWmoPanel();
+        PortalCorrectionService.syncIfStaleAsync(this);
         uiHandler.post(waitTicker);
     }
 
@@ -211,7 +212,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
         titles.addView(text("ROUTEPILOT", 16, BLUE, Typeface.BOLD));
-        titles.addView(text("V3.1 • WMO NAVIGATION", 10, MUTED, Typeface.BOLD));
+        titles.addView(text("V3.2 • WMO + SIM LAB", 10, MUTED, Typeface.BOLD));
         row.addView(titles, new LinearLayout.LayoutParams(0, dp(52), 1f));
 
         Button dashboard = darkButton("▦");
@@ -1640,9 +1641,49 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         TextView note = text(
                 "De busbaanontheffing wordt alleen binnen de officiële gemeentegrens van Tilburg toegepast. Bussluizen blijven altijd verboden.",
-                11, Color.DKGRAY, Typeface.NORMAL);
-        note.setPadding(0, dp(8), 0, 0);
+                11, MUTED, Typeface.NORMAL);
+        note.setPadding(0, dp(8), 0, dp(10));
         box.addView(note);
+
+        TextView portalTitle = text("SIMULATOR / CORRECTIEPORTAAL", 10, BLUE, Typeface.BOLD);
+        portalTitle.setPadding(0, dp(5), 0, dp(5));
+        box.addView(portalTitle);
+
+        EditText portalUrl = new EditText(this);
+        portalUrl.setHint("Portal URL, bijv. http://192.168.1.20:8765");
+        portalUrl.setSingleLine(true);
+        portalUrl.setText(PortalCorrectionStore.portalUrl(this));
+        box.addView(portalUrl);
+
+        EditText portalToken = new EditText(this);
+        portalToken.setHint("Portal token (optioneel op localhost)");
+        portalToken.setSingleLine(true);
+        portalToken.setText(PortalCorrectionStore.portalToken(this));
+        box.addView(portalToken);
+
+        TextView portalStatus = text(
+                PortalCorrectionStore.count(this) + " correctie(s) lokaal • laatste sync: "
+                        + (PortalCorrectionStore.lastSync(this) == 0 ? "nooit"
+                        : new SimpleDateFormat("dd-MM HH:mm", NL)
+                        .format(new Date(PortalCorrectionStore.lastSync(this)))),
+                11, MUTED, Typeface.NORMAL);
+        portalStatus.setPadding(0, dp(6), 0, dp(6));
+        box.addView(portalStatus);
+
+        Button syncPortal = darkButton("↻ Sync portalcorrecties");
+        syncPortal.setOnClickListener(v -> {
+            PortalCorrectionStore.saveSettings(this,
+                    portalUrl.getText().toString(), portalToken.getText().toString());
+            syncPortal.setEnabled(false);
+            syncPortal.setText("Synchroniseren…");
+            PortalCorrectionService.syncAsync(this, (ok, message, count) -> {
+                syncPortal.setEnabled(true);
+                syncPortal.setText("↻ Sync portalcorrecties");
+                portalStatus.setText(count + " correctie(s) lokaal • " + message);
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            });
+        });
+        box.addView(syncPortal);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Voertuigprofiel")
@@ -1668,6 +1709,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                         vehicle.rearLiftClearanceM = liftM;
                         vehicle.busLaneExemption = busLane.isChecked();
                         vehicle.save(this);
+                        PortalCorrectionStore.saveSettings(this,
+                                portalUrl.getText().toString(), portalToken.getText().toString());
+                        PortalCorrectionService.syncIfStaleAsync(this);
                         refreshVehicleSummary();
                         dialog.dismiss();
                     } catch (Exception e) {
