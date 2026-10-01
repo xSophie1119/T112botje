@@ -600,8 +600,8 @@ def build_training_pools(rng,count,progress=None):
 def quota_plan(count):
     # Bij 25: exact minimaal 5 ziekenhuis + 5 zorg. Bij andere batchgroottes
     # dezelfde 20/20%-verhouding, met minstens 1 zodra er ruimte is.
-    hospital=5 if count>=25 else max(1,round(count*0.20))
-    care=5 if count>=25 else max(1,round(count*0.20))
+    hospital=max(5,round(count*0.20)) if count>=25 else max(1,round(count*0.20))
+    care=max(5,round(count*0.20)) if count>=25 else max(1,round(count*0.20))
     if hospital+care>count:
         care=max(0,count-hospital)
     general=count-hospital-care
@@ -1354,7 +1354,7 @@ def source_status():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.4.0"
+    server_version = "RoutePilotSimulator/3.5.0"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -1388,7 +1388,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.4.0", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.5.0", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/source-status":
             return self.send_json(source_status())
@@ -1439,7 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = con.execute("SELECT * FROM scenarios ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
                 else:
                     rows = con.execute(
-                        "SELECT * FROM scenarios WHERE generator_version='3.4.0' ORDER BY id DESC LIMIT ?",
+                        "SELECT * FROM scenarios WHERE generator_version='3.5.0' ORDER BY id DESC LIMIT ?",
                         (limit,)
                     ).fetchall()
             out = []
@@ -1452,10 +1452,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stats":
             with db_lock, db() as con:
-                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0'").fetchone()[0]
-                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0' AND status='accepted'").fetchone()[0]
-                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0' AND status='rejected'").fetchone()[0]
-                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.4.0' AND status='error'").fetchone()[0]
+                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0'").fetchone()[0]
+                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0' AND status='accepted'").fetchone()[0]
+                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0' AND status='rejected'").fetchone()[0]
+                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version='3.5.0' AND status='error'").fetchone()[0]
                 corrections = con.execute("SELECT COUNT(*) FROM corrections WHERE active=1").fetchone()[0]
                 driver_trips = con.execute("SELECT COUNT(*) FROM driver_trips").fetchone()[0]
             return self.send_json({
@@ -1620,7 +1620,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.4.0 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.5.0 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
