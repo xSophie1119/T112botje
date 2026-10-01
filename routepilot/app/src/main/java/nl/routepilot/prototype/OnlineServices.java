@@ -104,6 +104,7 @@ public final class OnlineServices {
         public final double durationSeconds;
         public final List<NavStep> steps;
         public List<Restriction> restrictions = new ArrayList<>();
+        public List<LiveTrafficService.TrafficEvent> trafficEvents = new ArrayList<>();
         public String selectionNote = "";
 
         public RouteResult(List<GeoPoint> points, double distanceMeters,
@@ -124,6 +125,14 @@ public final class OnlineServices {
             int n = 0;
             for (Restriction r : restrictions) {
                 if (!r.critical && !r.informational) n++;
+            }
+            return n;
+        }
+
+        public int liveClosureCount() {
+            int n = 0;
+            for (LiveTrafficService.TrafficEvent e : trafficEvents) {
+                if (e.closure) n++;
             }
             return n;
         }
@@ -294,13 +303,34 @@ public final class OnlineServices {
         String line = buildOverpassLine(route.points);
         if (line.isEmpty()) return out;
 
-        String q = "[out:json][timeout:18];("
+        String q = "[out:json][timeout:20];("
                 + "nwr[\"maxheight\"](around:70," + line + ");"
                 + "nwr[\"maxwidth\"](around:70," + line + ");"
                 + "nwr[\"maxweight\"](around:70," + line + ");"
                 + "nwr[\"barrier\"=\"bus_trap\"](around:75," + line + ");"
-                + "way[\"highway\"=\"busway\"](around:55," + line + ");"
-                + "way[\"access\"=\"no\"][\"bus\"=\"yes\"](around:55," + line + ");"
+                + "way[\"highway\"=\"busway\"](around:70," + line + ");"
+                + "way[\"highway\"=\"bus_guideway\"](around:70," + line + ");"
+                + "way[\"busway\"](around:70," + line + ");"
+                + "way[\"busway:left\"](around:70," + line + ");"
+                + "way[\"busway:right\"](around:70," + line + ");"
+                + "way[\"lanes:bus\"](around:70," + line + ");"
+                + "way[\"lanes:bus:forward\"](around:70," + line + ");"
+                + "way[\"lanes:bus:backward\"](around:70," + line + ");"
+                + "way[\"lanes:psv\"](around:70," + line + ");"
+                + "way[\"lanes:psv:forward\"](around:70," + line + ");"
+                + "way[\"lanes:psv:backward\"](around:70," + line + ");"
+                + "way[\"bus:lanes\"](around:70," + line + ");"
+                + "way[\"bus:lanes:forward\"](around:70," + line + ");"
+                + "way[\"bus:lanes:backward\"](around:70," + line + ");"
+                + "way[\"psv:lanes\"](around:70," + line + ");"
+                + "way[\"psv:lanes:forward\"](around:70," + line + ");"
+                + "way[\"psv:lanes:backward\"](around:70," + line + ");"
+                + "way[\"access\"=\"no\"][\"bus\"~\"yes|designated|permissive\"](around:70," + line + ");"
+                + "way[\"access\"=\"no\"][\"psv\"~\"yes|designated|permissive\"](around:70," + line + ");"
+                + "way[\"motor_vehicle\"=\"no\"][\"bus\"~\"yes|designated|permissive\"](around:70," + line + ");"
+                + "way[\"motor_vehicle\"=\"no\"][\"psv\"~\"yes|designated|permissive\"](around:70," + line + ");"
+                + "way[\"vehicle\"=\"no\"][\"bus\"~\"yes|designated|permissive\"](around:70," + line + ");"
+                + "way[\"vehicle\"=\"no\"][\"psv\"~\"yes|designated|permissive\"](around:70," + line + ");"
                 + ");out center tags;";
 
         JSONObject root = new JSONObject(postForm(
@@ -327,9 +357,6 @@ public final class OnlineServices {
             if (distanceToRouteMeters(lat, lon, route.points) > 85.0) continue;
 
             String barrier = tags.optString("barrier", "");
-            String highway = tags.optString("highway", "");
-            String access = tags.optString("access", "");
-            String bus = tags.optString("bus", "");
 
             if ("bus_trap".equals(barrier)) {
                 addUnique(out, seen, new Restriction(
@@ -339,17 +366,20 @@ public final class OnlineServices {
                 ));
             }
 
-            if ("busway".equals(highway) || ("no".equals(access) && "yes".equals(bus))) {
+            if (hasBusLaneSignal(tags)) {
+                String busLaneDetail = busLaneDetail(tags);
                 if (vehicle.busLaneExemption) {
                     addUnique(out, seen, new Restriction(
-                            lat, lon, "BUSBAAN", "bus access",
-                            "Busbaan/bustoegang gevonden. In jouw profiel staat de busbaanvrijstelling aan.",
+                            lat, lon, "BUSBAAN", busLaneDetail,
+                            "Busbaan of bus-/PSV-gereserveerde rijstrook gevonden (" + busLaneDetail + "). "
+                                    + "In jouw profiel staat de busbaanvrijstelling aan.",
                             false, true
                     ));
                 } else {
                     addUnique(out, seen, new Restriction(
-                            lat, lon, "BUSBAAN", "bus access",
-                            "Busbaan/bustoegang gevonden zonder actieve vrijstelling in het voertuigprofiel.",
+                            lat, lon, "BUSBAAN", busLaneDetail,
+                            "Busbaan of bus-/PSV-gereserveerde rijstrook gevonden (" + busLaneDetail + ") "
+                                    + "zonder actieve vrijstelling in het voertuigprofiel.",
                             true, false
                     ));
                 }
@@ -364,6 +394,73 @@ public final class OnlineServices {
         }
 
         return out;
+    }
+
+    private static boolean hasBusLaneSignal(JSONObject tags) {
+        String highway = tags.optString("highway", "");
+        if ("busway".equals(highway) || "bus_guideway".equals(highway)) return true;
+
+        String[] directKeys = {
+                "lanes:bus", "lanes:bus:forward", "lanes:bus:backward",
+                "lanes:psv", "lanes:psv:forward", "lanes:psv:backward"
+        };
+        for (String key : directKeys) {
+            String value = tags.optString(key, "").trim();
+            if (!value.isEmpty() && !"0".equals(value) && !"no".equalsIgnoreCase(value)) {
+                return true;
+            }
+        }
+
+        String[] laneAccessKeys = {
+                "bus:lanes", "bus:lanes:forward", "bus:lanes:backward",
+                "psv:lanes", "psv:lanes:forward", "psv:lanes:backward"
+        };
+        for (String key : laneAccessKeys) {
+            String value = tags.optString(key, "").toLowerCase(Locale.ROOT);
+            if (value.contains("designated")) return true;
+        }
+
+        String[] legacyKeys = {"busway", "busway:left", "busway:right"};
+        for (String key : legacyKeys) {
+            String value = tags.optString(key, "").toLowerCase(Locale.ROOT);
+            if (value.contains("lane") || value.contains("opposite") || "yes".equals(value)) {
+                return true;
+            }
+        }
+
+        String access = tags.optString("access", "");
+        String motorVehicle = tags.optString("motor_vehicle", "");
+        String vehicle = tags.optString("vehicle", "");
+        boolean generalRestricted = "no".equals(access)
+                || "no".equals(motorVehicle)
+                || "no".equals(vehicle);
+
+        String bus = tags.optString("bus", "").toLowerCase(Locale.ROOT);
+        String psv = tags.optString("psv", "").toLowerCase(Locale.ROOT);
+        boolean busAllowed = bus.matches("yes|designated|permissive")
+                || psv.matches("yes|designated|permissive");
+
+        return generalRestricted && busAllowed;
+    }
+
+    private static String busLaneDetail(JSONObject tags) {
+        String[] keys = {
+                "highway", "lanes:bus", "lanes:bus:forward", "lanes:bus:backward",
+                "lanes:psv", "lanes:psv:forward", "lanes:psv:backward",
+                "bus:lanes", "bus:lanes:forward", "bus:lanes:backward",
+                "psv:lanes", "psv:lanes:forward", "psv:lanes:backward",
+                "busway", "busway:left", "busway:right",
+                "access", "motor_vehicle", "vehicle", "bus", "psv"
+        };
+        StringBuilder sb = new StringBuilder();
+        for (String key : keys) {
+            String value = tags.optString(key, "").trim();
+            if (value.isEmpty()) continue;
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(key).append('=').append(value);
+            if (sb.length() > 120) break;
+        }
+        return sb.length() == 0 ? "bus/PSV" : sb.toString();
     }
 
     private static void addNumericRestriction(List<Restriction> out, Set<String> seen,
@@ -439,6 +536,10 @@ public final class OnlineServices {
     public static RouteResult chooseSafer(RouteResult current, RouteResult challenger) {
         if (current == null) return challenger;
         if (challenger == null) return current;
+
+        int aClosures = current.liveClosureCount();
+        int bClosures = challenger.liveClosureCount();
+        if (aClosures != bClosures) return bClosures < aClosures ? challenger : current;
 
         int aCritical = current.criticalCount();
         int bCritical = challenger.criticalCount();
