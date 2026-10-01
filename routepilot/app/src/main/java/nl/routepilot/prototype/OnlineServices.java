@@ -13,21 +13,25 @@ import java.net.URLEncoder;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 public final class OnlineServices {
 
     public static final String USER_AGENT =
-            "RoutePilot/0.2 (personal Android prototype; https://github.com/xSophie1119)";
+            "RoutePilot/1.0-debug (personal Android prototype; https://github.com/xSophie1119)";
+
+    private static final Locale NL = new Locale("nl", "NL");
 
     private static final Map<String, SearchResult> SEARCH_CACHE =
-            new LinkedHashMap<String, SearchResult>(40, 0.75f, true) {
+            new LinkedHashMap<String, SearchResult>(50, 0.75f, true) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<String, SearchResult> eldest) {
-                    return size() > 40;
+                    return size() > 50;
                 }
             };
 
@@ -40,25 +44,36 @@ public final class OnlineServices {
         public final double lon;
         public final String label;
 
-        SearchResult(double lat, double lon, String label) {
+        public SearchResult(double lat, double lon, String label) {
             this.lat = lat;
             this.lon = lon;
             this.label = label;
         }
+
+        public DestinationStore.Item toStoredItem() {
+            return new DestinationStore.Item(label, lat, lon);
+        }
     }
 
-    public static class RouteResult {
-        public final List<GeoPoint> points;
+    public static class NavStep {
+        public final double lat;
+        public final double lon;
         public final double distanceMeters;
-        public final double durationSeconds;
-        public final String firstInstruction;
+        public final String instruction;
+        public final String roadName;
+        public final String maneuverType;
+        public final String modifier;
 
-        RouteResult(List<GeoPoint> points, double distanceMeters,
-                    double durationSeconds, String firstInstruction) {
-            this.points = points;
+        public NavStep(double lat, double lon, double distanceMeters,
+                       String instruction, String roadName,
+                       String maneuverType, String modifier) {
+            this.lat = lat;
+            this.lon = lon;
             this.distanceMeters = distanceMeters;
-            this.durationSeconds = durationSeconds;
-            this.firstInstruction = firstInstruction;
+            this.instruction = instruction;
+            this.roadName = roadName;
+            this.maneuverType = maneuverType;
+            this.modifier = modifier;
         }
     }
 
@@ -69,15 +84,48 @@ public final class OnlineServices {
         public final String value;
         public final String description;
         public final boolean critical;
+        public final boolean informational;
 
-        Restriction(double lat, double lon, String type, String value,
-                    String description, boolean critical) {
+        public Restriction(double lat, double lon, String type, String value,
+                           String description, boolean critical, boolean informational) {
             this.lat = lat;
             this.lon = lon;
             this.type = type;
             this.value = value;
             this.description = description;
             this.critical = critical;
+            this.informational = informational;
+        }
+    }
+
+    public static class RouteResult {
+        public final List<GeoPoint> points;
+        public final double distanceMeters;
+        public final double durationSeconds;
+        public final List<NavStep> steps;
+        public List<Restriction> restrictions = new ArrayList<>();
+        public String selectionNote = "";
+
+        public RouteResult(List<GeoPoint> points, double distanceMeters,
+                           double durationSeconds, List<NavStep> steps) {
+            this.points = points;
+            this.distanceMeters = distanceMeters;
+            this.durationSeconds = durationSeconds;
+            this.steps = steps;
+        }
+
+        public int criticalCount() {
+            int n = 0;
+            for (Restriction r : restrictions) if (r.critical) n++;
+            return n;
+        }
+
+        public int cautionCount() {
+            int n = 0;
+            for (Restriction r : restrictions) {
+                if (!r.critical && !r.informational) n++;
+            }
+            return n;
         }
     }
 
@@ -98,10 +146,10 @@ public final class OnlineServices {
 
         String url = "https://nominatim.openstreetmap.org/search"
                 + "?format=jsonv2&limit=1&addressdetails=1&accept-language=nl"
+                + "&countrycodes=nl,be,de"
                 + "&q=" + URLEncoder.encode(query, "UTF-8");
 
-        String body = get(url, 12000);
-        JSONArray arr = new JSONArray(body);
+        JSONArray arr = new JSONArray(get(url, 12000));
         if (arr.length() == 0) throw new IllegalArgumentException("Bestemming niet gevonden.");
 
         JSONObject item = arr.getJSONObject(0);
@@ -117,195 +165,349 @@ public final class OnlineServices {
         return result;
     }
 
-    public static RouteResult route(double fromLat, double fromLon,
-                                    double toLat, double toLon) throws Exception {
+    public static List<RouteResult> routeCandidates(double fromLat, double fromLon,
+                                                    double toLat, double toLon) throws Exception {
         String url = String.format(Locale.US,
                 "https://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f"
-                        + "?overview=full&geometries=geojson&steps=true&alternatives=false",
+                        + "?overview=full&geometries=geojson&steps=true&alternatives=true",
                 fromLon, fromLat, toLon, toLat);
 
-        JSONObject root = new JSONObject(get(url, 20000));
+        JSONObject root = new JSONObject(get(url, 22000));
         if (!"Ok".equalsIgnoreCase(root.optString("code"))) {
             throw new IllegalArgumentException("Geen autoroute gevonden.");
         }
 
-        JSONArray routes = root.getJSONArray("routes");
-        if (routes.length() == 0) throw new IllegalArgumentException("Geen route beschikbaar.");
-        JSONObject r = routes.getJSONObject(0);
+        JSONArray routesJson = root.optJSONArray("routes");
+        if (routesJson == null || routesJson.length() == 0) {
+            throw new IllegalArgumentException("Geen route beschikbaar.");
+        }
 
-        JSONArray coordinates = r.getJSONObject("geometry").getJSONArray("coordinates");
+        List<RouteResult> result = new ArrayList<>();
+        for (int i = 0; i < routesJson.length() && i < 3; i++) {
+            JSONObject route = routesJson.getJSONObject(i);
+            List<GeoPoint> points = parseGeometry(route);
+            List<NavStep> steps = parseSteps(route);
+            result.add(new RouteResult(
+                    points,
+                    route.optDouble("distance", 0),
+                    route.optDouble("duration", 0),
+                    steps
+            ));
+        }
+        return result;
+    }
+
+    private static List<GeoPoint> parseGeometry(JSONObject route) throws Exception {
+        JSONArray coordinates = route.getJSONObject("geometry").getJSONArray("coordinates");
         List<GeoPoint> points = new ArrayList<>(coordinates.length());
         for (int i = 0; i < coordinates.length(); i++) {
             JSONArray c = coordinates.getJSONArray(i);
             points.add(new GeoPoint(c.getDouble(1), c.getDouble(0)));
         }
-
-        String firstInstruction = "Volg de route.";
-        JSONArray legs = r.optJSONArray("legs");
-        if (legs != null && legs.length() > 0) {
-            JSONArray steps = legs.getJSONObject(0).optJSONArray("steps");
-            if (steps != null && steps.length() > 1) {
-                JSONObject step = steps.getJSONObject(1);
-                String name = step.optString("name", "");
-                String type = step.optJSONObject("maneuver") != null
-                        ? step.getJSONObject("maneuver").optString("type", "")
-                        : "";
-                if (!name.isEmpty()) {
-                    firstInstruction = humanManeuver(type) + " " + name;
-                }
-            }
-        }
-
-        return new RouteResult(
-                points,
-                r.optDouble("distance", 0),
-                r.optDouble("duration", 0),
-                firstInstruction.trim()
-        );
+        return points;
     }
 
-    private static String humanManeuver(String type) {
-        if ("turn".equals(type)) return "Ga richting";
-        if ("depart".equals(type)) return "Vertrek via";
-        if ("merge".equals(type)) return "Voeg in op";
-        if ("on ramp".equals(type)) return "Neem de oprit naar";
-        if ("off ramp".equals(type)) return "Neem de afrit naar";
-        if ("roundabout".equals(type)) return "Neem de rotonde naar";
-        return "Vervolg via";
-    }
+    private static List<NavStep> parseSteps(JSONObject route) throws Exception {
+        List<NavStep> out = new ArrayList<>();
+        JSONArray legs = route.optJSONArray("legs");
+        if (legs == null) return out;
 
-    public static List<Restriction> scanRestrictions(List<GeoPoint> routePoints) throws Exception {
-        List<Restriction> out = new ArrayList<>();
-        if (routePoints == null || routePoints.size() < 2) return out;
+        for (int l = 0; l < legs.length(); l++) {
+            JSONArray steps = legs.getJSONObject(l).optJSONArray("steps");
+            if (steps == null) continue;
 
-        double minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
-        for (GeoPoint p : routePoints) {
-            minLat = Math.min(minLat, p.getLatitude());
-            maxLat = Math.max(maxLat, p.getLatitude());
-            minLon = Math.min(minLon, p.getLongitude());
-            maxLon = Math.max(maxLon, p.getLongitude());
-        }
+            for (int i = 0; i < steps.length(); i++) {
+                JSONObject step = steps.getJSONObject(i);
+                JSONObject maneuver = step.optJSONObject("maneuver");
+                if (maneuver == null) continue;
 
-        double latSpan = maxLat - minLat;
-        double lonSpan = maxLon - minLon;
-        if (latSpan > 0.28 || lonSpan > 0.38) {
-            return out;
-        }
+                JSONArray location = maneuver.optJSONArray("location");
+                if (location == null || location.length() < 2) continue;
 
-        double pad = 0.0012;
-        minLat -= pad; minLon -= pad; maxLat += pad; maxLon += pad;
+                String type = maneuver.optString("type", "");
+                String modifier = maneuver.optString("modifier", "");
+                String road = step.optString("name", "");
+                String instruction = buildInstruction(type, modifier, road);
 
-        String bbox = String.format(Locale.US, "%.6f,%.6f,%.6f,%.6f",
-                minLat, minLon, maxLat, maxLon);
-        String q = "[out:json][timeout:18];("
-                + "nwr[\"maxheight\"](" + bbox + ");"
-                + "nwr[\"maxwidth\"](" + bbox + ");"
-                + "nwr[\"maxweight\"](" + bbox + ");"
-                + "nwr[\"barrier\"=\"bus_trap\"](" + bbox + ");"
-                + ");out center tags;";
-
-        String body = postForm(
-                "https://overpass-api.de/api/interpreter",
-                "data=" + URLEncoder.encode(q, "UTF-8"),
-                25000
-        );
-
-        JSONArray elements = new JSONObject(body).optJSONArray("elements");
-        if (elements == null) return out;
-
-        for (int i = 0; i < elements.length() && out.size() < 12; i++) {
-            JSONObject el = elements.getJSONObject(i);
-            JSONObject tags = el.optJSONObject("tags");
-            if (tags == null) continue;
-
-            double lat;
-            double lon;
-            if (el.has("lat") && el.has("lon")) {
-                lat = el.getDouble("lat");
-                lon = el.getDouble("lon");
-            } else {
-                JSONObject center = el.optJSONObject("center");
-                if (center == null) continue;
-                lat = center.getDouble("lat");
-                lon = center.getDouble("lon");
+                out.add(new NavStep(
+                        location.getDouble(1),
+                        location.getDouble(0),
+                        step.optDouble("distance", 0),
+                        instruction,
+                        road,
+                        type,
+                        modifier
+                ));
             }
-
-            if (distanceToRouteMeters(lat, lon, routePoints) > 65.0) continue;
-
-            if ("bus_trap".equals(tags.optString("barrier"))) {
-                out.add(new Restriction(lat, lon, "BUSSLUIS", "bus_trap",
-                        "Mogelijke bussluis vlak langs de berekende route.", true));
-            }
-
-            addNumericRestriction(out, lat, lon, "HOOGTE", "maxheight",
-                    tags.optString("maxheight", ""), 2.76, "m");
-            addNumericRestriction(out, lat, lon, "BREEDTE", "maxwidth",
-                    tags.optString("maxwidth", ""), 2.34, "m");
-            addNumericRestriction(out, lat, lon, "GEWICHT", "maxweight",
-                    tags.optString("maxweight", ""), 3.50, "t");
         }
         return out;
     }
 
-    private static void addNumericRestriction(List<Restriction> out, double lat, double lon,
-                                              String type, String key, String raw,
-                                              double vehicleValue, String unit) {
-        if (raw == null || raw.isEmpty() || out.size() >= 12) return;
+    private static String buildInstruction(String type, String modifier, String road) {
+        String target = road == null || road.trim().isEmpty() ? "" : " " + road.trim();
+
+        if ("depart".equals(type)) return "Vertrek" + (target.isEmpty() ? "" : " via" + target);
+        if ("arrive".equals(type)) return "Je bestemming is bereikt";
+        if ("roundabout".equals(type) || "rotary".equals(type)) {
+            return "Ga de rotonde op" + (target.isEmpty() ? "" : " richting" + target);
+        }
+        if ("merge".equals(type)) return "Voeg in" + (target.isEmpty() ? "" : " op" + target);
+        if ("on ramp".equals(type)) return "Neem de oprit" + (target.isEmpty() ? "" : " naar" + target);
+        if ("off ramp".equals(type)) return "Neem de afrit" + (target.isEmpty() ? "" : " naar" + target);
+        if ("fork".equals(type)) {
+            return "Houd " + directionWord(modifier) + (target.isEmpty() ? "" : " richting" + target);
+        }
+        if ("continue".equals(type) || "new name".equals(type)) {
+            return "Ga rechtdoor" + (target.isEmpty() ? "" : " op" + target);
+        }
+        if ("end of road".equals(type)) {
+            return "Aan het einde " + turnWord(modifier) + (target.isEmpty() ? "" : " naar" + target);
+        }
+        if ("turn".equals(type)) {
+            return turnWord(modifier) + (target.isEmpty() ? "" : " naar" + target);
+        }
+
+        return target.isEmpty() ? "Volg de route" : "Vervolg via" + target;
+    }
+
+    private static String turnWord(String modifier) {
+        if (modifier == null) modifier = "";
+        if (modifier.contains("left")) return "Sla linksaf";
+        if (modifier.contains("right")) return "Sla rechtsaf";
+        if ("uturn".equals(modifier)) return "Keer om";
+        if ("straight".equals(modifier)) return "Ga rechtdoor";
+        return "Ga verder";
+    }
+
+    private static String directionWord(String modifier) {
+        if (modifier == null) return "de juiste richting aan";
+        if (modifier.contains("left")) return "links aan";
+        if (modifier.contains("right")) return "rechts aan";
+        return "de juiste richting aan";
+    }
+
+    public static List<Restriction> scanRestrictions(RouteResult route,
+                                                     VehicleProfile vehicle) throws Exception {
+        List<Restriction> out = new ArrayList<>();
+        if (route == null || route.points.size() < 2) return out;
+
+        String line = buildOverpassLine(route.points);
+        if (line.isEmpty()) return out;
+
+        String q = "[out:json][timeout:18];("
+                + "nwr[\"maxheight\"](around:70," + line + ");"
+                + "nwr[\"maxwidth\"](around:70," + line + ");"
+                + "nwr[\"maxweight\"](around:70," + line + ");"
+                + "nwr[\"barrier\"=\"bus_trap\"](around:75," + line + ");"
+                + "way[\"highway\"=\"busway\"](around:55," + line + ");"
+                + "way[\"access\"=\"no\"][\"bus\"=\"yes\"](around:55," + line + ");"
+                + ");out center tags;";
+
+        JSONObject root = new JSONObject(postForm(
+                "https://overpass-api.de/api/interpreter",
+                "data=" + URLEncoder.encode(q, "UTF-8"),
+                26000
+        ));
+
+        JSONArray elements = root.optJSONArray("elements");
+        if (elements == null) return out;
+
+        Set<String> seen = new HashSet<>();
+
+        for (int i = 0; i < elements.length() && out.size() < 24; i++) {
+            JSONObject el = elements.getJSONObject(i);
+            JSONObject tags = el.optJSONObject("tags");
+            if (tags == null) continue;
+
+            double[] center = getCenter(el);
+            if (center == null) continue;
+
+            double lat = center[0];
+            double lon = center[1];
+            if (distanceToRouteMeters(lat, lon, route.points) > 85.0) continue;
+
+            String barrier = tags.optString("barrier", "");
+            String highway = tags.optString("highway", "");
+            String access = tags.optString("access", "");
+            String bus = tags.optString("bus", "");
+
+            if ("bus_trap".equals(barrier)) {
+                addUnique(out, seen, new Restriction(
+                        lat, lon, "BUSSLUIS", "bus_trap",
+                        "Bussluis vlak langs de route. Deze blijft verboden in het voertuigprofiel.",
+                        true, false
+                ));
+            }
+
+            if ("busway".equals(highway) || ("no".equals(access) && "yes".equals(bus))) {
+                if (vehicle.busLaneExemption) {
+                    addUnique(out, seen, new Restriction(
+                            lat, lon, "BUSBAAN", "bus access",
+                            "Busbaan/bustoegang gevonden. In jouw profiel staat de busbaanvrijstelling aan.",
+                            false, true
+                    ));
+                } else {
+                    addUnique(out, seen, new Restriction(
+                            lat, lon, "BUSBAAN", "bus access",
+                            "Busbaan/bustoegang gevonden zonder actieve vrijstelling in het voertuigprofiel.",
+                            true, false
+                    ));
+                }
+            }
+
+            addNumericRestriction(out, seen, lat, lon, "HOOGTE",
+                    tags.optString("maxheight", ""), vehicle.heightM, "m", 0.18);
+            addNumericRestriction(out, seen, lat, lon, "BREEDTE",
+                    tags.optString("maxwidth", ""), vehicle.widthM, "m", 0.16);
+            addNumericRestriction(out, seen, lat, lon, "GEWICHT",
+                    tags.optString("maxweight", ""), vehicle.maxWeightT, "t", 0.35);
+        }
+
+        return out;
+    }
+
+    private static void addNumericRestriction(List<Restriction> out, Set<String> seen,
+                                              double lat, double lon,
+                                              String type, String raw,
+                                              double vehicleValue, String unit,
+                                              double cautionMargin) {
+        if (raw == null || raw.trim().isEmpty()) return;
         Double limit = parseFirstNumber(raw);
         if (limit == null) return;
 
-        boolean critical = limit <= vehicleValue;
-        boolean close = limit <= vehicleValue + ("m".equals(unit) ? 0.20 : 0.30);
+        boolean critical = limit + 0.001 < vehicleValue;
+        boolean close = limit <= vehicleValue + cautionMargin;
         if (!critical && !close) return;
 
-        String description = critical
-                ? String.format(new Locale("nl", "NL"), "%s-limiet %s %s is te laag voor het voertuigprofiel.",
-                type.toLowerCase(Locale.ROOT), raw, unit)
-                : String.format(new Locale("nl", "NL"), "%s-limiet %s %s ligt dicht bij het voertuigprofiel.",
-                type.toLowerCase(Locale.ROOT), raw, unit);
+        String description;
+        if (critical) {
+            description = String.format(NL,
+                    "%s %s %s is lager dan jouw voertuigwaarde %.2f %s.",
+                    type.toLowerCase(Locale.ROOT), raw, unit, vehicleValue, unit);
+        } else {
+            description = String.format(NL,
+                    "%s %s %s ligt dicht bij jouw voertuigwaarde %.2f %s.",
+                    type.toLowerCase(Locale.ROOT), raw, unit, vehicleValue, unit);
+        }
 
-        out.add(new Restriction(lat, lon, type, raw, description, critical));
+        addUnique(out, seen, new Restriction(
+                lat, lon, type, raw, description, critical, false
+        ));
     }
 
-    private static Double parseFirstNumber(String raw) {
-        String cleaned = raw.toLowerCase(Locale.ROOT)
-                .replace(',', '.')
-                .replace("meter", "")
-                .replace("metre", "")
-                .replace("meters", "")
-                .replace("tonnes", "")
-                .replace("tonne", "")
-                .replace("tons", "")
-                .replace("ton", "")
-                .replace("t", "")
-                .trim();
-        StringBuilder n = new StringBuilder();
-        boolean started = false;
-        for (int i = 0; i < cleaned.length(); i++) {
-            char c = cleaned.charAt(i);
-            if ((c >= '0' && c <= '9') || c == '.') {
-                n.append(c);
-                started = true;
-            } else if (started) {
-                break;
+    private static void addUnique(List<Restriction> out, Set<String> seen, Restriction r) {
+        String key = r.type + ":" + Math.round(r.lat * 100000)
+                + ":" + Math.round(r.lon * 100000);
+        if (seen.add(key)) out.add(r);
+    }
+
+    private static double[] getCenter(JSONObject el) {
+        try {
+            if (el.has("lat") && el.has("lon")) {
+                return new double[]{el.getDouble("lat"), el.getDouble("lon")};
+            }
+            JSONObject center = el.optJSONObject("center");
+            if (center != null) {
+                return new double[]{center.getDouble("lat"), center.getDouble("lon")};
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static String buildOverpassLine(List<GeoPoint> points) {
+        if (points == null || points.size() < 2) return "";
+        int maxPairs = 48;
+        int stride = Math.max(1, (int) Math.ceil(points.size() / (double) maxPairs));
+        StringBuilder sb = new StringBuilder();
+
+        for (int i = 0; i < points.size(); i += stride) {
+            GeoPoint p = points.get(i);
+            if (sb.length() > 0) sb.append(',');
+            sb.append(String.format(Locale.US, "%.6f,%.6f",
+                    p.getLatitude(), p.getLongitude()));
+        }
+
+        GeoPoint last = points.get(points.size() - 1);
+        String lastText = String.format(Locale.US, "%.6f,%.6f",
+                last.getLatitude(), last.getLongitude());
+        if (!sb.toString().endsWith(lastText)) {
+            sb.append(',').append(lastText);
+        }
+        return sb.toString();
+    }
+
+    public static RouteResult chooseSafer(RouteResult current, RouteResult challenger) {
+        if (current == null) return challenger;
+        if (challenger == null) return current;
+
+        int aCritical = current.criticalCount();
+        int bCritical = challenger.criticalCount();
+        if (aCritical != bCritical) return bCritical < aCritical ? challenger : current;
+
+        int aCaution = current.cautionCount();
+        int bCaution = challenger.cautionCount();
+        if (aCaution != bCaution) return bCaution < aCaution ? challenger : current;
+
+        if (challenger.durationSeconds < current.durationSeconds * 1.15) {
+            return challenger.durationSeconds < current.durationSeconds ? challenger : current;
+        }
+        return current;
+    }
+
+    public static int closestRoutePointIndex(double lat, double lon, List<GeoPoint> points) {
+        if (points == null || points.isEmpty()) return -1;
+        int best = 0;
+        double min = Double.MAX_VALUE;
+        int stride = Math.max(1, points.size() / 1200);
+
+        for (int i = 0; i < points.size(); i += stride) {
+            GeoPoint p = points.get(i);
+            double d = haversine(lat, lon, p.getLatitude(), p.getLongitude());
+            if (d < min) {
+                min = d;
+                best = i;
             }
         }
-        try {
-            return n.length() == 0 ? null : Double.parseDouble(n.toString());
-        } catch (Exception e) {
-            return null;
+
+        int from = Math.max(0, best - stride);
+        int to = Math.min(points.size() - 1, best + stride);
+        for (int i = from; i <= to; i++) {
+            GeoPoint p = points.get(i);
+            double d = haversine(lat, lon, p.getLatitude(), p.getLongitude());
+            if (d < min) {
+                min = d;
+                best = i;
+            }
         }
+        return best;
+    }
+
+    public static double distanceFromRouteMeters(double lat, double lon, List<GeoPoint> points) {
+        int idx = closestRoutePointIndex(lat, lon, points);
+        if (idx < 0) return Double.MAX_VALUE;
+        GeoPoint p = points.get(idx);
+        return haversine(lat, lon, p.getLatitude(), p.getLongitude());
+    }
+
+    public static double remainingRouteDistanceMeters(int fromIndex, List<GeoPoint> points) {
+        if (points == null || points.size() < 2) return 0;
+        int start = Math.max(0, Math.min(fromIndex, points.size() - 1));
+        double total = 0;
+        for (int i = start + 1; i < points.size(); i++) {
+            GeoPoint a = points.get(i - 1);
+            GeoPoint b = points.get(i);
+            total += haversine(a.getLatitude(), a.getLongitude(),
+                    b.getLatitude(), b.getLongitude());
+        }
+        return total;
+    }
+
+    public static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+        return haversine(lat1, lon1, lat2, lon2);
     }
 
     private static double distanceToRouteMeters(double lat, double lon, List<GeoPoint> points) {
-        double min = Double.MAX_VALUE;
-        int stride = Math.max(1, points.size() / 900);
-        for (int i = 0; i < points.size(); i += stride) {
-            GeoPoint p = points.get(i);
-            min = Math.min(min, haversine(lat, lon, p.getLatitude(), p.getLongitude()));
-            if (min < 18) break;
-        }
-        return min;
+        return distanceFromRouteMeters(lat, lon, points);
     }
 
     private static double haversine(double lat1, double lon1, double lat2, double lon2) {
@@ -318,6 +520,38 @@ public final class OnlineServices {
                 + Math.cos(p1) * Math.cos(p2)
                 * Math.sin(dl / 2) * Math.sin(dl / 2);
         return 2 * r * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    private static Double parseFirstNumber(String raw) {
+        String cleaned = raw.toLowerCase(Locale.ROOT)
+                .replace(',', '.')
+                .replace("meters", "")
+                .replace("meter", "")
+                .replace("metre", "")
+                .replace("tonnes", "")
+                .replace("tonne", "")
+                .replace("tons", "")
+                .replace("ton", "")
+                .replace("t", "")
+                .trim();
+
+        StringBuilder n = new StringBuilder();
+        boolean started = false;
+        for (int i = 0; i < cleaned.length(); i++) {
+            char c = cleaned.charAt(i);
+            if ((c >= '0' && c <= '9') || c == '.') {
+                n.append(c);
+                started = true;
+            } else if (started) {
+                break;
+            }
+        }
+
+        try {
+            return n.length() == 0 ? null : Double.parseDouble(n.toString());
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static String get(String rawUrl, int timeoutMs) throws Exception {
@@ -341,9 +575,11 @@ public final class OnlineServices {
         con.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
         byte[] data = payload.getBytes(StandardCharsets.UTF_8);
         con.setFixedLengthStreamingMode(data.length);
+
         try (OutputStream out = con.getOutputStream()) {
             out.write(data);
         }
+
         return readResponse(con);
     }
 
