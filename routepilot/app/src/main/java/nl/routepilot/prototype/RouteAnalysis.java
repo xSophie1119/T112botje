@@ -20,6 +20,8 @@ public final class RouteAnalysis {
         public int uTurns;
         public int narrowSignals;
         public int learnedPenalty;
+        public int portalAdjustment;
+        public boolean doorPreferenceSuppressed;
 
         public String summary(){
             StringBuilder b=new StringBuilder();
@@ -40,9 +42,16 @@ public final class RouteAnalysis {
         r.uTurns=countUTurns(route);
         r.narrowSignals=countType(route,"SMALLE WEG");
         r.learnedPenalty=RoutePilotStore.learnedPenalty(c,route.points);
+        r.portalAdjustment=PortalCorrectionStore.routeAdjustment(c,route.points);
 
         r.approachBearing=approachBearing(route.points);
-        r.destinationOnRight=isDestinationOnRight(route.points,destination.lat,destination.lon);
+        PortalCorrectionStore.Correction entrance =
+                PortalCorrectionStore.nearestOfType(c,"entrance",destination.lat,destination.lon);
+        double sideLat=entrance==null?destination.lat:entrance.lat;
+        double sideLon=entrance==null?destination.lon:entrance.lon;
+        r.destinationOnRight=isDestinationOnRight(route.points,sideLat,sideLon);
+        r.doorPreferenceSuppressed=PortalCorrectionStore.ignoreDoorSide(
+                c,destination.lat,destination.lon);
 
         if(closures>0){score-=Math.min(80,closures*40);r.reasons.add(closures+" actuele afsluiting(en)");}
         int liveHindrance=0;
@@ -62,7 +71,15 @@ public final class RouteAnalysis {
         if(r.narrowSignals>0){score-=Math.min(24,r.narrowSignals*5);r.reasons.add(r.narrowSignals+" smalle/krappe weg-signaal(en)");}
         if(r.uTurns>0){score-=Math.min(25,r.uTurns*12);r.reasons.add(r.uTurns+" keerbeweging(en) in route");}
         if(r.learnedPenalty>0){score-=r.learnedPenalty;r.reasons.add("route raakt eerder vermeden punten");}
-        if(!r.destinationOnRight){
+        if(r.portalAdjustment!=0){
+            score-=r.portalAdjustment;
+            r.reasons.add(r.portalAdjustment>0
+                    ?"webportaal-correcties maken deze route minder geschikt"
+                    :"webportaal-correcties ondersteunen deze route");
+        }
+        if(r.doorPreferenceSuppressed){
+            r.reasons.add("rechterdeurvoorkeur op deze locatie uitgeschakeld via correctieportaal");
+        }else if(!r.destinationOnRight){
             r.reasons.add("rechterdeurvoorkeur niet gehaald; dit verlaagt de veiligheidsscore niet");
         } else {
             r.reasons.add("aankomstzijde past bij rechterdeurvoorkeur");
