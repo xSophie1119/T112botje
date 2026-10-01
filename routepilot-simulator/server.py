@@ -928,6 +928,28 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             return self.send_json({"ok": True, "version": "3.4.0", "router": ROUTER, "db": str(DB_PATH)})
 
+        if path == "/api/source-status":
+            return self.send_json(source_status())
+
+        if path.startswith("/api/batches/"):
+            batch_id=path.rsplit("/",1)[1]
+            snap=_batch_snapshot(batch_id)
+            if not snap:
+                return self.send_json({"error":"batch not found"},404)
+            requested=max(1,int(snap.get("requested_count",1)))
+            snap["progress_pct"]=min(
+                100,
+                round((int(snap.get("success_count",0))/requested)*100)
+            )
+            return self.send_json(snap)
+
+        if path == "/api/batches":
+            with db_lock,db() as con:
+                rows=con.execute(
+                    "SELECT * FROM batch_runs ORDER BY created_at DESC LIMIT 20"
+                ).fetchall()
+            return self.send_json({"batches":[dict(r) for r in rows]})
+
         if path == "/api/corrections" or path == "/api/corrections/export":
             return self.send_json({"version": 1, "generated_at": now_ms(), "corrections": active_corrections()})
 
@@ -1043,10 +1065,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, "trip_id": trip_id}, 201)
 
         if path == "/api/simulate":
-            count = payload.get("count", 25)
-            seed = payload.get("seed", int(time.time()))
-            batch = simulate_batch(count, seed)
-            return self.send_json({"ok": True, "batch_id": batch})
+            try:
+                count=max(1,min(200,int(payload.get("count",25))))
+                seed=int(payload.get("seed",int(time.time())))
+            except Exception:
+                return self.send_json({"error":"ongeldige count/seed"},400)
+            batch=create_batch(count,seed)
+            return self.send_json(
+                {"ok":True,"batch_id":batch,"status":"queued"},
+                202
+            )
 
         if path == "/api/corrections":
             t = str(payload.get("type", "")).strip()
