@@ -114,8 +114,8 @@ public final class LookAheadEngine {
     }
 
     private static String formatDistance(double m) {
-        if (m < 950) return String.format(Locale.NL, "%.0f m", m);
-        return String.format(Locale.NL, "%.1f km", m / 1000.0);
+        if (m < 950) return String.format(new Locale("nl","NL"), "%.0f m", m);
+        return String.format(new Locale("nl","NL"), "%.1f km", m / 1000.0);
     }
 
     private static String shorten(String s, int max) {
