@@ -17,6 +17,9 @@ public final class RouteCoordinator {
         public boolean trafficScanOk=true;
         public boolean signScanOk=true;
         public boolean reversedForDoor=false;
+        public DestinationAccessService.Result destinationAccess;
+        public RouteConfidence.Result confidence;
+        public ArrivalEngine.Result arrival;
         public String note="";
     }
 
@@ -36,7 +39,9 @@ public final class RouteCoordinator {
 
         if(!selected.analysis.destinationOnRight
                 && selected.route.liveClosureCount()==0
-                && selected.route.criticalCount()==0){
+                && selected.route.criticalCount()==0
+                && (selected.destinationAccess==null
+                    || !selected.destinationAccess.shouldSkipDoorPreference())){
             Prepared base=selected;
             try{
                 OnlineServices.RouteResult reversed=OnlineServices.reverseApproachCandidate(
@@ -62,6 +67,16 @@ public final class RouteCoordinator {
             selected.note=append(selected.note,
                     "Route bevat nog "+selected.analysis.uTurns+" keerbeweging(en); controleer of omrijden praktischer is.");
         }
+
+        if(selected.destinationAccess!=null
+                && selected.destinationAccess.shouldSkipDoorPreference()){
+            selected.note=append(selected.note,
+                    "Rechterdeurvoorkeur bewust losgelaten door bestemmingsbereikbaarheid/eenrichtings-/keerbaarheidsanalyse.");
+        }
+
+        selected.confidence=RouteConfidence.calculate(context,selected,destination);
+        selected.arrival=ArrivalEngine.evaluate(context,destination,selected.route,
+                selected.analysis,selected.destinationAccess);
         return selected;
     }
 
@@ -90,7 +105,15 @@ public final class RouteCoordinator {
             route.officialSpeeds=new ArrayList<>();
         }
 
+        try{
+            p.destinationAccess=DestinationAccessService.scan(destination,route.points);
+        }catch(Exception ignored){
+            p.destinationAccess=new DestinationAccessService.Result();
+        }
+
         p.analysis=RouteAnalysis.analyze(context,route,destination);
+        p.confidence=RouteConfidence.calculate(context,p,destination);
+        p.arrival=ArrivalEngine.evaluate(context,destination,route,p.analysis,p.destinationAccess);
         return p;
     }
 
@@ -104,10 +127,18 @@ public final class RouteCoordinator {
                 if(a.analysis.score!=b.analysis.score)
                     return Integer.compare(b.analysis.score,a.analysis.score);
 
+                if(a.analysis.learnedPenalty!=b.analysis.learnedPenalty)
+                    return Integer.compare(a.analysis.learnedPenalty,b.analysis.learnedPenalty);
+
                 if(a.analysis.uTurns!=b.analysis.uTurns)
                     return Integer.compare(a.analysis.uTurns,b.analysis.uTurns);
 
-                if(a.analysis.destinationOnRight!=b.analysis.destinationOnRight)
+                boolean aDoorEligible=a.destinationAccess==null
+                        || !a.destinationAccess.shouldSkipDoorPreference();
+                boolean bDoorEligible=b.destinationAccess==null
+                        || !b.destinationAccess.shouldSkipDoorPreference();
+                if(aDoorEligible && bDoorEligible
+                        && a.analysis.destinationOnRight!=b.analysis.destinationOnRight)
                     return a.analysis.destinationOnRight?-1:1;
 
                 return Double.compare(a.route.durationSeconds,b.route.durationSeconds);
@@ -124,6 +155,8 @@ public final class RouteCoordinator {
     private static boolean isPracticalDoorApproach(Prepared base, Prepared candidate){
         if(base==null||candidate==null) return false;
         if(!candidate.analysis.destinationOnRight) return false;
+        if(candidate.destinationAccess!=null
+                && candidate.destinationAccess.shouldSkipDoorPreference()) return false;
 
         // OSRM levert alleen een route die volgens de kaartgrafiek berijdbaar is.
         // Daardoor wordt een onmogelijke tegenrichting in een eenrichtingsstraat niet afgedwongen.
