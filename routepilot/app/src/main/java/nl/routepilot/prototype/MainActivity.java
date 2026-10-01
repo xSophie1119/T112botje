@@ -83,6 +83,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private long lastRerouteMs = 0L;
     private long lastTrafficRefreshMs = 0L;
+    private volatile long providerEtaMs = 0L;
+    private volatile long lastProviderEtaRefreshMs = 0L;
     private int currentStepIndex = 0;
     private int currentSpeedLimit = -1;
     private double currentStepDistance = 0;
@@ -843,6 +845,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         arrivalDetectorState.reset();
         lastRerouteMs = System.currentTimeMillis();
         lastTrafficRefreshMs = System.currentTimeMillis();
+        providerEtaMs = 0L;
+        lastProviderEtaRefreshMs = 0L;
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         searchArea.setVisibility(View.GONE);
@@ -919,7 +923,15 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                 Math.max(0, routeIndex), currentRoute.points);
         double remainingSeconds = currentRoute.distanceMeters > 1
                 ? currentRoute.durationSeconds * (remaining / currentRoute.distanceMeters) : 0;
-        long etaMs = System.currentTimeMillis() + (long)(remainingSeconds * 1000);
+        long nowForEta = System.currentTimeMillis();
+        long etaMs = nowForEta + (long)(remainingSeconds * 1000);
+        if (providerEtaMs > nowForEta
+                && nowForEta - lastProviderEtaRefreshMs < 180_000L) {
+            etaMs = providerEtaMs;
+        }
+        if (nowForEta - lastProviderEtaRefreshMs > 120_000L) {
+            refreshProviderEtaAsync(location);
+        }
         String etaText = new SimpleDateFormat("HH:mm", NL).format(new Date(etaMs));
 
         Integer wkdSpeed = null;
@@ -1014,6 +1026,28 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             map.setFollowMode(true);
             map.setUserLocation(location, true);
         }
+    }
+
+    private void refreshProviderEtaAsync(Location location) {
+        if (location == null || currentDestination == null) return;
+        RoutingProviderSettings settings = RoutingProviderSettings.load(this);
+        if (!settings.useHere()) return;
+
+        final double lat = location.getLatitude();
+        final double lon = location.getLongitude();
+        final OnlineServices.SearchResult destination = currentDestination;
+        final VehicleProfile profile = vehicle;
+        lastProviderEtaRefreshMs = System.currentTimeMillis();
+
+        new Thread(() -> {
+            try {
+                double seconds = HereRoutingService.estimateDurationSeconds(
+                        MainActivity.this, lat, lon, destination, profile, settings);
+                providerEtaMs = System.currentTimeMillis() + (long)(seconds * 1000.0);
+            } catch (Exception ignored) {
+                providerEtaMs = 0L;
+            }
+        }).start();
     }
 
     private void updateStepGuidance(double lat, double lon) {
