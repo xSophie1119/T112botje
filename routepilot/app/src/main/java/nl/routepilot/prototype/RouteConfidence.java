@@ -52,8 +52,7 @@ public final class RouteConfidence {
         }
 
         if (p.route.officialSpeeds == null || p.route.officialSpeeds.isEmpty()) {
-            score -= 6;
-            r.reasons.add("officiële snelheidslaag ontbreekt voor (deel van) route");
+            r.reasons.add("WKD-snelheidslaag wordt op de achtergrond bijgeladen");
         } else {
             r.reasons.add("officiële WKD-snelheidslaag geladen");
         }
