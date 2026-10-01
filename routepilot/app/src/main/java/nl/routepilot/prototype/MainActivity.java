@@ -185,7 +185,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         buildWmoPanel(panel);
 
         TextView disclaimer = text(
-                "RoutePilot V3.2 debug • MapLibre/OpenFreeMap + OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
+                "RoutePilot V3.3 debug • MapLibre/OpenFreeMap + OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
                 10, MUTED, Typeface.NORMAL);
         disclaimer.setGravity(Gravity.CENTER);
         disclaimer.setPadding(0, dp(12), 0, 0);
@@ -214,7 +214,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
         titles.addView(text("ROUTEPILOT", 16, BLUE, Typeface.BOLD));
-        titles.addView(text("V3.2 • WMO + SIM LAB", 10, MUTED, Typeface.BOLD));
+        titles.addView(text("V3.3 • WMO ROUTING CORE", 10, MUTED, Typeface.BOLD));
         row.addView(titles, new LinearLayout.LayoutParams(0, dp(52), 1f));
 
         Button dashboard = darkButton("▦");
@@ -738,6 +738,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                 ? "rechterdeur aan ingangzijde ✓"
                 : "normale aankomstzijde • rechterdeurvoorkeur niet toegepast";
         String meta = shortLabel(currentDestination.label) + " • " + side
+                + "\n🧭 basisrouter: " + currentRoute.providerName
+                + (currentRoute.providerVehicleAware ? " • voertuigbewust" : " • achteraf gevalideerd")
                 + String.format(NL, "\n⚡ analyse %.2f s", lastPreparationMs / 1000.0);
         if (!currentRoute.selectionNote.isEmpty()) meta += "\n" + currentRoute.selectionNote;
         if (note != null && !note.isEmpty()) meta += "\n" + note;
@@ -765,6 +767,17 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         int live = currentRoute.trafficEvents == null ? 0 : currentRoute.trafficEvents.size();
         int signs = currentRoute.roadSigns == null ? 0 : currentRoute.roadSigns.size();
         StringBuilder b = new StringBuilder();
+
+        b.append("🧭 ").append(currentRoute.providerName)
+                .append(currentRoute.providerVehicleAware
+                        ? " • voertuigbewuste basisroute"
+                        : " • generieke basisroute + RoutePilot-validatie");
+        if (currentRoute.ndwAccessibilityChecked)
+            b.append("\n🇳🇱 NDW Bereikbaarheidskaart gecontroleerd");
+        if (currentRoute.ndwAccessibilityHardHits > 0)
+            b.append(" • ").append(currentRoute.ndwAccessibilityHardHits)
+                    .append(" conflict(en)");
+        b.append("\n");
 
         if (currentRoute.liveClosureCount() > 0)
             b.append("🚧 ").append(currentRoute.liveClosureCount()).append(" actuele afsluiting(en) • ");
@@ -1666,6 +1679,43 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         note.setPadding(0, dp(8), 0, dp(10));
         box.addView(note);
 
+        RoutingProviderSettings routingSettings = RoutingProviderSettings.load(this);
+
+        TextView routingTitle = text("ROUTING V3.3", 10, BLUE, Typeface.BOLD);
+        routingTitle.setPadding(0, dp(8), 0, dp(5));
+        box.addView(routingTitle);
+
+        CheckBox herePrimary = new CheckBox(this);
+        herePrimary.setText("HERE voertuigbewuste routing primair (OSRM fallback)");
+        herePrimary.setChecked(!"OSRM".equalsIgnoreCase(routingSettings.provider));
+        box.addView(herePrimary);
+
+        EditText hereKey = new EditText(this);
+        hereKey.setHint("HERE API-key");
+        hereKey.setSingleLine(true);
+        hereKey.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        hereKey.setText(routingSettings.hereApiKey);
+        box.addView(hereKey);
+
+        CheckBox ndwAccessibility = new CheckBox(this);
+        ndwAccessibility.setText("Officiële NDW Bereikbaarheidskaart valideren");
+        ndwAccessibility.setChecked(routingSettings.ndwAccessibility);
+        box.addView(ndwAccessibility);
+
+        CheckBox strictBusSegments = new CheckBox(this);
+        strictBusSegments.setText("Strenge busbaansegmenten (alleen expliciet toegestane segmenten)");
+        strictBusSegments.setChecked(routingSettings.strictBusLaneSegments);
+        box.addView(strictBusSegments);
+
+        TextView routingStatus = text(
+                routingSettings.hasHereKey()
+                        ? "HERE-key ingesteld • voertuigafmetingen gaan mee in de basisroute."
+                        : "Geen HERE-key ingesteld • RoutePilot gebruikt OSRM + eigen/NDW-validatie.",
+                11, MUTED, Typeface.NORMAL);
+        routingStatus.setPadding(0, dp(4), 0, dp(10));
+        box.addView(routingStatus);
+
         TextView portalTitle = text("SIMULATOR / CORRECTIEPORTAAL", 10, BLUE, Typeface.BOLD);
         portalTitle.setPadding(0, dp(5), 0, dp(5));
         box.addView(portalTitle);
@@ -1730,6 +1780,13 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                         vehicle.rearLiftClearanceM = liftM;
                         vehicle.busLaneExemption = busLane.isChecked();
                         vehicle.save(this);
+
+                        routingSettings.provider = herePrimary.isChecked() ? "AUTO" : "OSRM";
+                        routingSettings.hereApiKey = hereKey.getText().toString().trim();
+                        routingSettings.ndwAccessibility = ndwAccessibility.isChecked();
+                        routingSettings.strictBusLaneSegments = strictBusSegments.isChecked();
+                        routingSettings.save(this);
+
                         PortalCorrectionStore.saveSettings(this,
                                 portalUrl.getText().toString(), portalToken.getText().toString());
                         PortalCorrectionService.syncIfStaleAsync(this);
