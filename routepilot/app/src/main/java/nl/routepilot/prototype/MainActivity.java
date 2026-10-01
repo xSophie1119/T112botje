@@ -639,7 +639,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (offRoute > 110 && !routeLoading
                 && System.currentTimeMillis() - lastRerouteMs > 18000) {
             if (!learnedThisDeviation && location.getAccuracy() <= 45) {
-                RoutePilotStore.learnAvoidance(this, lat, lon, "herhaalde afwijking van voorgestelde route");
+                int avoidedIndex = Math.max(0, Math.min(routeIndex, currentRoute.points.size() - 1));
+                GeoPoint avoided = currentRoute.points.get(avoidedIndex);
+                RoutePilotStore.learnAvoidance(this,
+                        avoided.getLatitude(), avoided.getLongitude(),
+                        "herhaalde afwijking van voorgestelde weg");
                 learnedThisDeviation = true;
             }
             RoutePilotStore.markReroute(this);
@@ -805,19 +809,25 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                 List<LiveTrafficService.TrafficEvent> events =
                         LiveTrafficService.eventsNearRoute(snapshot.points);
                 int oldClosures = snapshot.liveClosureCount();
+                int oldImportant = importantTrafficCount(snapshot.trafficEvents);
                 int newClosures = 0;
                 for (LiveTrafficService.TrafficEvent e : events) if (e.closure) newClosures++;
                 final int finalClosures = newClosures;
+                final int finalImportant = importantTrafficCount(events);
 
                 runOnUiThread(() -> {
                     if (currentRoute != snapshot) return;
                     currentRoute.trafficEvents = events;
                     drawCurrentRoute();
 
-                    if (finalClosures > oldClosures && !routeLoading) {
+                    if ((finalClosures > oldClosures || finalImportant > oldImportant) && !routeLoading) {
                         RoutePilotStore.markReroute(this);
-                        navStatus.setText("🚧 NIEUWE AFSLUITING • HERROUTEREN");
-                        speak("Nieuwe actuele afsluiting op of vlak langs de route. RoutePilot berekent opnieuw.");
+                        navStatus.setText(finalClosures > oldClosures
+                                ? "🚧 NIEUWE AFSLUITING • HERROUTEREN"
+                                : "📡 NIEUWE VERKEERSHINDER • HERROUTEREN");
+                        speak(finalClosures > oldClosures
+                                ? "Nieuwe actuele afsluiting op of vlak langs de route. RoutePilot berekent opnieuw."
+                                : "Nieuwe actuele verkeershinder op of vlak langs de route. RoutePilot vergelijkt alternatieven.");
                         lastRerouteMs = System.currentTimeMillis();
                         setRouteLoading(true);
                         new Thread(() -> {
@@ -833,6 +843,19 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                 });
             } catch (Exception ignored) {}
         }).start();
+    }
+
+    private int importantTrafficCount(List<LiveTrafficService.TrafficEvent> events) {
+        int n = 0;
+        if (events == null) return 0;
+        for (LiveTrafficService.TrafficEvent e : events) {
+            if (e.closure) { n++; continue; }
+            String t = e.type == null ? "" : e.type.toUpperCase(Locale.ROOT);
+            if (t.contains("ONGEVAL") || t.contains("WERKZAAMHEDEN")
+                    || t.contains("OBSTAKEL") || t.contains("VOERTUIG")
+                    || t.contains("VERKEERSHINDER") || t.contains("WEGTOESTAND")) n++;
+        }
+        return n;
     }
 
     private void applyReroute(String note) {
