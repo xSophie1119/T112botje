@@ -11,16 +11,18 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 public final class RoadDataService {
-    private static final String TILBURG_SIGNS =
-            "https://data.ndw.nu/api/rest/static-road-data/traffic-signs/v4/current-state?countyCode=GM0855&status=PLACED";
+    private static final String SIGNS_BASE =
+            "https://data.ndw.nu/api/rest/static-road-data/traffic-signs/v4/current-state";
     private static final long CACHE_MS = 6 * 60 * 60 * 1000L;
     private static final Object LOCK = new Object();
-    private static List<Sign> cachedSigns = new ArrayList<>();
-    private static long cachedAt = 0L;
+    private static final Map<String,List<Sign>> SIGN_CACHE = new HashMap<>();
+    private static final Map<String,Long> CACHE_TIME = new HashMap<>();
 
     private RoadDataService() {}
 
@@ -65,19 +67,33 @@ public final class RoadDataService {
     public static List<Sign> signsNearRoute(List<GeoPoint> route) throws Exception {
         List<Sign> out = new ArrayList<>();
         if (route == null || route.size() < 2) return out;
-        for (Sign source : loadTilburgSigns()) {
-            if (!MunicipalityService.isInTilburg(source.lat, source.lon)) continue;
-            Sign s = new Sign(source.id, source.rvvCode, source.blackCode,
-                    source.roadName, source.countyCode, source.lat, source.lon, source.bearing);
-            int idx = closestIndex(s.lat, s.lon, route);
-            GeoPoint p = route.get(idx);
-            double d = OnlineServices.distanceMeters(s.lat, s.lon, p.getLatitude(), p.getLongitude());
-            if (d <= 70) {
-                s.routeIndex = idx;
-                s.routeDistance = d;
-                if (directionRelevant(s, route)) out.add(s);
+
+        List<String> counties = MunicipalityService.countyCodesForRoute(route);
+        if (counties.isEmpty()) counties.add("GM0855");
+
+        for (String countyCode : counties) {
+            List<Sign> countySigns;
+            try {
+                countySigns = loadSigns(countyCode);
+            } catch (Exception e) {
+                continue;
+            }
+
+            for (Sign source : countySigns) {
+                Sign s = new Sign(source.id, source.rvvCode, source.blackCode,
+                        source.roadName, source.countyCode, source.lat, source.lon, source.bearing);
+                int idx = closestIndex(s.lat, s.lon, route);
+                GeoPoint p = route.get(idx);
+                double d = OnlineServices.distanceMeters(
+                        s.lat, s.lon, p.getLatitude(), p.getLongitude());
+                if (d <= 70) {
+                    s.routeIndex = idx;
+                    s.routeDistance = d;
+                    if (directionRelevant(s, route)) out.add(s);
+                }
             }
         }
+
         out.sort(Comparator.comparingInt(a -> a.routeIndex));
         return out;
     }
@@ -137,40 +153,54 @@ public final class RoadDataService {
         return d > 180 ? 360 - d : d;
     }
 
-    private static List<Sign> loadTilburgSigns() throws Exception {
+    private static List<Sign> loadSigns(String countyCode) throws Exception {
         synchronized (LOCK) {
-            if (!cachedSigns.isEmpty() && System.currentTimeMillis() - cachedAt < CACHE_MS)
-                return new ArrayList<>(cachedSigns);
+            List<Sign> cached = SIGN_CACHE.get(countyCode);
+            Long at = CACHE_TIME.get(countyCode);
+            if (cached != null && at != null
+                    && System.currentTimeMillis() - at < CACHE_MS) {
+                return new ArrayList<>(cached);
+            }
         }
-        JSONObject root = new JSONObject(get(TILBURG_SIGNS));
+
+        String url = SIGNS_BASE + "?countyCode="
+                + java.net.URLEncoder.encode(countyCode, "UTF-8")
+                + "&status=PLACED";
+        JSONObject root = new JSONObject(get(url));
         JSONArray features = root.optJSONArray("features");
         List<Sign> parsed = new ArrayList<>();
         if (features != null) {
             for (int i = 0; i < features.length(); i++) {
-                JSONObject f = features.optJSONObject(i);
-                if (f == null) continue;
-                JSONObject p = f.optJSONObject("properties");
-                JSONObject g = f.optJSONObject("geometry");
+                JSONObject feature = features.optJSONObject(i);
+                if (feature == null) continue;
+                JSONObject p = feature.optJSONObject("properties");
+                JSONObject g = feature.optJSONObject("geometry");
                 if (p == null || g == null) continue;
-                JSONArray c = g.optJSONArray("coordinates");
-                if (c == null || c.length() < 2) continue;
+                JSONArray coords = g.optJSONArray("coordinates");
+                if (coords == null || coords.length() < 2) continue;
+
                 JSONObject loc = p.optJSONObject("location");
                 JSONObject road = loc == null ? null : loc.optJSONObject("road");
                 JSONObject county = loc == null ? null : loc.optJSONObject("county");
                 int bearing = loc == null ? -1 : loc.optInt("bearing", -1);
+
+                String parsedCounty = county == null
+                        ? countyCode : county.optString("code", countyCode);
+
                 parsed.add(new Sign(
-                        f.optString("id", p.optString("id", "")),
+                        feature.optString("id", p.optString("id", "")),
                         p.optString("rvvCode", ""),
                         p.optString("blackCode", ""),
                         road == null ? "" : road.optString("name", ""),
-                        county == null ? "" : county.optString("code", ""),
-                        c.optDouble(1), c.optDouble(0), bearing
+                        parsedCounty,
+                        coords.optDouble(1), coords.optDouble(0), bearing
                 ));
             }
         }
+
         synchronized (LOCK) {
-            cachedSigns = parsed;
-            cachedAt = System.currentTimeMillis();
+            SIGN_CACHE.put(countyCode, parsed);
+            CACHE_TIME.put(countyCode, System.currentTimeMillis());
         }
         return new ArrayList<>(parsed);
     }
