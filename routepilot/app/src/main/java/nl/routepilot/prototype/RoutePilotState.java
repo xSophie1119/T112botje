@@ -3,6 +3,12 @@ package nl.routepilot.prototype;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import org.json.JSONArray;
+import org.osmdroid.util.GeoPoint;
+
+import java.util.ArrayList;
+import java.util.List;
+
 public final class RoutePilotState {
     private static final String PREFS="routepilot_nav_state";
     private RoutePilotState(){}
@@ -23,6 +29,44 @@ public final class RoutePilotState {
                 .apply();
     }
 
+    public static void saveRoute(Context c, OnlineServices.RouteResult route) {
+        if (route == null || route.points == null) return;
+        JSONArray arr = new JSONArray();
+        int stride = Math.max(1, route.points.size() / 350);
+        for (int i = 0; i < route.points.size(); i += stride) {
+            GeoPoint p = route.points.get(i);
+            JSONArray pt = new JSONArray();
+            pt.put(p.getLatitude()); pt.put(p.getLongitude());
+            arr.put(pt);
+        }
+        if (!route.points.isEmpty()) {
+            GeoPoint p = route.points.get(route.points.size() - 1);
+            JSONArray pt = new JSONArray(); pt.put(p.getLatitude()); pt.put(p.getLongitude());
+            arr.put(pt);
+        }
+        c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
+                .putString("route_geometry",arr.toString()).apply();
+    }
+
+    public static List<GeoPoint> loadRoute(Context c) {
+        List<GeoPoint> out = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(c.getSharedPreferences(PREFS,Context.MODE_PRIVATE)
+                    .getString("route_geometry","[]"));
+            for (int i=0;i<arr.length();i++) {
+                JSONArray p=arr.getJSONArray(i);
+                out.add(new GeoPoint(p.getDouble(0),p.getDouble(1)));
+            }
+        } catch(Exception ignored){}
+        return out;
+    }
+
+    public static void updatePosition(Context c,double lat,double lon){
+        c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
+                .putLong("lat",Double.doubleToRawLongBits(lat))
+                .putLong("lon",Double.doubleToRawLongBits(lon)).apply();
+    }
+
     public static Snapshot get(Context c){
         SharedPreferences p=c.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
         Snapshot s=new Snapshot();
@@ -30,6 +74,8 @@ public final class RoutePilotState {
         s.warning=p.getString("warning","");s.etaMs=p.getLong("eta",0);
         s.speedLimit=p.getInt("speedLimit",-1);s.safetyScore=p.getInt("safetyScore",0);
         s.destination=p.getString("destination","");
+        s.lat=Double.longBitsToDouble(p.getLong("lat",Double.doubleToRawLongBits(0)));
+        s.lon=Double.longBitsToDouble(p.getLong("lon",Double.doubleToRawLongBits(0)));
         s.stepDistanceM=Double.longBitsToDouble(p.getLong("stepDistance",Double.doubleToRawLongBits(0)));
         s.remainingM=Double.longBitsToDouble(p.getLong("remaining",Double.doubleToRawLongBits(0)));
         return s;
@@ -38,6 +84,6 @@ public final class RoutePilotState {
     public static class Snapshot{
         public boolean active; public String instruction,warning,destination;
         public double stepDistanceM,remainingM; public long etaMs;
-        public int speedLimit,safetyScore;
+        public int speedLimit,safetyScore; public double lat,lon;
     }
 }
