@@ -706,6 +706,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             currentDestination = destination;
             currentRoute = prepared.route;
             currentAnalysis = prepared.analysis;
+            currentConfidence = prepared.confidence;
+            currentArrival = prepared.arrival;
+            currentDestinationAccess = prepared.destinationAccess;
             DestinationStore.addRecent(this, destination.toStoredItem());
             refreshSavedPlaces();
 
@@ -734,6 +737,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         routeMeta.setText(meta);
 
         warningText.setText(buildRouteSummary());
+        confidenceText.setText(currentConfidence == null ? ""
+                : "Datakwaliteit: " + currentConfidence.score + "/100 • " + currentConfidence.label);
+        if (currentArrival != null) arrivalText.setText(currentArrival.summary());
         warningText.setTextColor(currentAnalysis.score < 58 ? RED
                 : currentAnalysis.score < 82 ? ORANGE : GREEN);
 
@@ -769,12 +775,28 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             b.append("\n🧠 Leerlaag: eerder vermeden punten beïnvloeden deze route.");
         b.append("\n🚪 Rechterdeurvoorkeur: ")
                 .append(currentAnalysis.destinationOnRight ? "gehaald." : "niet betrouwbaar gehaald.");
+
+        if (currentDestinationAccess != null)
+            b.append("\n🏁 Bestemming: ").append(currentDestinationAccess.summary());
+        if (currentConfidence != null)
+            b.append("\n📊 Datakwaliteit: ").append(currentConfidence.score)
+                    .append("/100 • ").append(currentConfidence.label);
         return b.toString();
     }
 
     private void startNavigation() {
         if (currentRoute == null || currentDestination == null
                 || currentLocation == null || currentAnalysis == null) return;
+
+        WmoSessionManager.Snapshot wmo = WmoSessionManager.get(this);
+        if (wmo.phase == WmoSessionManager.Phase.IDLE
+                || wmo.phase == WmoSessionManager.Phase.COMPLETED
+                || wmo.phase == WmoSessionManager.Phase.NO_SHOW) {
+            WmoSessionManager.beginPickup(this, currentDestination.label);
+        } else if (wmo.phase == WmoSessionManager.Phase.PASSENGER_ONBOARD) {
+            WmoSessionManager.beginDropoff(this, currentDestination.label);
+        }
+        updateWmoPanel();
 
         navigating = true;
         followMode = true;
@@ -808,7 +830,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         map.getController().setZoom(17.0);
         centerOnMe();
-        speak("Navigatie gestart. RoutePilot bewaakt live verkeer, verkeersborden, voertuigbeperkingen en aankomstzijde.");
+        WmoSessionManager.Snapshot activeWmo = WmoSessionManager.get(this);
+        speak(activeWmo.phase == WmoSessionManager.Phase.TO_DROPOFF
+                ? "Navigatie naar de brengbestemming gestart."
+                : "Navigatie naar de cliënt gestart.");
         updateNavigationProgress(currentLocation);
     }
 
@@ -877,6 +902,24 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         updateStepGuidance(lat, lon);
         updateGeofencedWarnings(lat, lon, routeIndex);
 
+        currentLookAhead = LookAheadEngine.analyze(currentRoute, routeIndex, 5000.0);
+        lookAheadText.setText(currentLookAhead.compact);
+
+        double toDestination = OnlineServices.distanceMeters(
+                lat, lon, currentDestination.lat, currentDestination.lon);
+        if (toDestination <= 300.0 && currentArrival != null) {
+            arrivalText.setText("AANKOMSTMODUS • " + currentArrival.summary());
+            navStatus.setText("🏁 AANKOMSTMODUS");
+        } else if (currentArrival != null) {
+            arrivalText.setText("");
+        }
+
+        String confidenceSummary = currentConfidence == null ? ""
+                : currentConfidence.score + "/100 • " + currentConfidence.label;
+        RoutePilotState.updateContext(this, currentLookAhead.compact,
+                toDestination <= 300.0 && currentArrival != null ? currentArrival.summary() : "",
+                confidenceSummary);
+
         RoutePilotState.update(this, true, currentInstruction, currentWarning,
                 currentStepDistance, remaining, etaMs,
                 currentSpeedLimit, currentAnalysis.score, currentDestination.label);
@@ -886,8 +929,6 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             refreshLiveTraffic();
         }
 
-        double toDestination = OnlineServices.distanceMeters(
-                lat, lon, currentDestination.lat, currentDestination.lon);
         if (toDestination < 35) {
             arrive();
             return;
