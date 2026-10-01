@@ -23,9 +23,10 @@ HOST = os.environ.get("ROUTEPILOT_SIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ROUTEPILOT_SIM_PORT", "8765"))
 TOKEN = os.environ.get("ROUTEPILOT_PORTAL_TOKEN", "")
 ROUTER = os.environ.get("ROUTEPILOT_ROUTER_URL", "https://router.project-osrm.org").rstrip("/")
-USER_AGENT = "RoutePilot-Simulator/3.3.1 (+https://github.com/xSophie1119/T112botje)"
+USER_AGENT = "RoutePilot-Simulator/3.3.2 (+https://github.com/xSophie1119/T112botje)"
 
-# Public / neighborhood-level anchors only; no client data is baked into the simulator.
+# Public area seeds used only to discover concrete public addresses/POIs.
+# The seed itself is NEVER presented as the final training destination.
 ANCHORS = [
     ("Centrum", 51.5555, 5.0913),
     ("Spoorzone", 51.5606, 5.0837),
@@ -96,6 +97,15 @@ CREATE TABLE IF NOT EXISTS scenarios (
     destination_name TEXT NOT NULL,
     destination_lat REAL NOT NULL,
     destination_lon REAL NOT NULL,
+    origin_target_lat REAL NOT NULL DEFAULT 0,
+    origin_target_lon REAL NOT NULL DEFAULT 0,
+    destination_target_lat REAL NOT NULL DEFAULT 0,
+    destination_target_lon REAL NOT NULL DEFAULT 0,
+    origin_stop_name TEXT NOT NULL DEFAULT '',
+    destination_stop_name TEXT NOT NULL DEFAULT '',
+    origin_target_to_stop_m REAL NOT NULL DEFAULT 0,
+    destination_target_to_stop_m REAL NOT NULL DEFAULT 0,
+    generator_version TEXT NOT NULL DEFAULT 'legacy',
     distance_m REAL NOT NULL DEFAULT 0,
     duration_s REAL NOT NULL DEFAULT 0,
     score REAL NOT NULL DEFAULT 0,
@@ -118,6 +128,28 @@ def db():
 
 with db() as con:
     con.executescript(SCHEMA)
+    existing={row["name"] for row in con.execute("PRAGMA table_info(scenarios)").fetchall()}
+    additions={
+        "origin_target_lat":"REAL NOT NULL DEFAULT 0",
+        "origin_target_lon":"REAL NOT NULL DEFAULT 0",
+        "destination_target_lat":"REAL NOT NULL DEFAULT 0",
+        "destination_target_lon":"REAL NOT NULL DEFAULT 0",
+        "origin_stop_name":"TEXT NOT NULL DEFAULT ''",
+        "destination_stop_name":"TEXT NOT NULL DEFAULT ''",
+        "origin_target_to_stop_m":"REAL NOT NULL DEFAULT 0",
+        "destination_target_to_stop_m":"REAL NOT NULL DEFAULT 0",
+        "generator_version":"TEXT NOT NULL DEFAULT 'legacy'",
+    }
+    for name,definition in additions.items():
+        if name not in existing:
+            con.execute(f"ALTER TABLE scenarios ADD COLUMN {name} {definition}")
+    # Oude scenario's zijn gegenereerd met grove wijkankers en worden niet
+    # langer als geldige training aangeboden. Correcties staan in een aparte
+    # tabel en blijven behouden.
+    con.execute(
+        "UPDATE scenarios SET generator_version='legacy' "
+        "WHERE generator_version IS NULL OR generator_version='' "
+    )
 
 
 def now_ms():
@@ -131,6 +163,120 @@ def haversine_m(a_lat, a_lon, b_lat, b_lon):
     dl = math.radians(b_lon - a_lon)
     h = math.sin(dp/2)**2 + math.cos(p1) * math.cos(p2) * math.sin(dl/2)**2
     return 2 * r * math.asin(min(1, math.sqrt(h)))
+
+
+_training_location_cache={}
+_training_location_lock=threading.Lock()
+
+def _element_point(element):
+    if "lat" in element and "lon" in element:
+        return float(element["lat"]),float(element["lon"])
+    center=element.get("center") or {}
+    if "lat" in center and "lon" in center:
+        return float(center["lat"]),float(center["lon"])
+    return None
+
+def _location_label(tags, area_name):
+    name=str(tags.get("name","") or "").strip()
+    street=str(tags.get("addr:street","") or "").strip()
+    number=str(tags.get("addr:housenumber","") or "").strip()
+    city=str(tags.get("addr:city","") or "Tilburg").strip()
+    if name:
+        address=(" ".join(x for x in (street,number) if x)).strip()
+        return f"{name} · {address}" if address else f"{name} · {area_name}"
+    if street and number:
+        return f"{street} {number}, {city}"
+    return ""
+
+def discover_training_locations(anchor):
+    area_name,lat,lon=anchor
+    key=(area_name,round(lat,4),round(lon,4))
+    with _training_location_lock:
+        cached=_training_location_cache.get(key)
+    if cached is not None:
+        return list(cached)
+
+    query=(
+        f'[out:json][timeout:12];('
+        f'nwr(around:850,{lat:.6f},{lon:.6f})["addr:housenumber"]["addr:street"];'
+        f'nwr(around:850,{lat:.6f},{lon:.6f})["healthcare"];'
+        f'nwr(around:850,{lat:.6f},{lon:.6f})["social_facility"];'
+        f'nwr(around:850,{lat:.6f},{lon:.6f})["amenity"~"hospital|clinic|doctors|community_centre|nursing_home"];'
+        f');out center tags;'
+    )
+    payload=urllib.parse.urlencode({"data":query}).encode("utf-8")
+    req=urllib.request.Request(
+        "https://overpass-api.de/api/interpreter",
+        data=payload,
+        headers={
+            "User-Agent":USER_AGENT,
+            "Accept":"application/json",
+            "Content-Type":"application/x-www-form-urlencoded; charset=UTF-8",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req,timeout=15) as resp:
+        root=json.loads(resp.read().decode("utf-8"))
+
+    found=[]
+    seen=set()
+    for element in root.get("elements",[]):
+        point=_element_point(element)
+        if not point:
+            continue
+        tags=element.get("tags") or {}
+        label=_location_label(tags,area_name)
+        if not label:
+            continue
+        la,lo=point
+        if haversine_m(lat,lon,la,lo)>950:
+            continue
+        k=(label.lower(),round(la,5),round(lo,5))
+        if k in seen:
+            continue
+        seen.add(k)
+        care=bool(tags.get("healthcare") or tags.get("social_facility")
+                  or str(tags.get("amenity","")) in (
+                      "hospital","clinic","doctors","community_centre","nursing_home"))
+        found.append({
+            "name":label,"lat":la,"lon":lo,
+            "area":area_name,"care":care,
+        })
+
+    # Zorglocaties eerst, daarna gewone echte adressen. Cap om de pool klein
+    # en stabiel te houden.
+    found.sort(key=lambda x:(not x["care"],x["name"].lower()))
+    found=found[:36]
+    with _training_location_lock:
+        _training_location_cache[key]=list(found)
+    return found
+
+def build_training_location_pool(rng,count):
+    anchors=list(ANCHORS)
+    rng.shuffle(anchors)
+    target=max(18,min(70,12+count//2))
+    pool=[]
+    seen=set()
+    for anchor in anchors:
+        try:
+            items=discover_training_locations(anchor)
+        except Exception:
+            continue
+        rng.shuffle(items)
+        for item in items[:10]:
+            key=(item["name"].lower(),round(item["lat"],5),round(item["lon"],5))
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append((item["name"],item["lat"],item["lon"]))
+            if len(pool)>=target:
+                return pool
+    if len(pool)<8:
+        raise RuntimeError(
+            "Te weinig concrete publieke adressen/POI's gevonden voor betrouwbare training. "
+            "Probeer later opnieuw wanneer Overpass beschikbaar is."
+        )
+    return pool
 
 
 SAFE_ENDPOINT_CLASSES = {
@@ -256,7 +402,7 @@ def safe_training_endpoint(name, lat, lon):
     try:
         p = _overpass_safe_endpoint(lat, lon)
         return (
-            f"{name} · {p['road_name']}",
+            name,
             float(p["lat"]),
             float(p["lon"]),
             p,
@@ -318,7 +464,7 @@ def route_score(route, corrections):
 
 
 def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
-    key_raw = f"safe-v2:{o_lat:.5f},{o_lon:.5f}>{d_lat:.5f},{d_lon:.5f}"
+    key_raw = f"exact-target-v3:{o_lat:.5f},{o_lon:.5f}>{d_lat:.5f},{d_lon:.5f}"
     cache_key = hashlib.sha256(key_raw.encode()).hexdigest()
     with db_lock, db() as con:
         row = con.execute("SELECT response_json,created_at FROM route_cache WHERE cache_key=?", (cache_key,)).fetchone()
@@ -344,92 +490,169 @@ def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
 
 
 def simulate_pair(batch_id, origin, destination, corrections):
-    o_name, o_lat, o_lon = origin
-    d_name, d_lat, d_lon = destination
+    original_o_name, original_o_lat, original_o_lon = origin
+    original_d_name, original_d_lat, original_d_lon = destination
     created = now_ms()
-    try:
-        o_name, o_lat, o_lon, o_meta = safe_training_endpoint(o_name, o_lat, o_lon)
-        d_name, d_lat, d_lon, d_meta = safe_training_endpoint(d_name, d_lat, d_lon)
-        data = cached_osrm_route(o_lat, o_lon, d_lat, d_lon)
 
-        # OSRM rapporteert waar hij de waypoints werkelijk heeft gesnapt.
-        # Als dat ondanks onze lokale wegselectie nog te ver weg is, verwerpen.
+    # Defaults preserve the exact target even if route generation fails.
+    o_name,o_lat,o_lon=original_o_name,original_o_lat,original_o_lon
+    d_name,d_lat,d_lon=original_d_name,original_d_lat,original_d_lon
+    o_stop_name=d_stop_name=""
+    o_target_stop=d_target_stop=0.0
+
+    try:
+        _, route_o_lat, route_o_lon, o_meta = safe_training_endpoint(
+            original_o_name, original_o_lat, original_o_lon
+        )
+        _, route_d_lat, route_d_lon, d_meta = safe_training_endpoint(
+            original_d_name, original_d_lat, original_d_lon
+        )
+        data = cached_osrm_route(route_o_lat, route_o_lon, route_d_lat, route_d_lon)
+
         waypoints = data.get("waypoints") or []
-        if len(waypoints) >= 2:
-            for idx, meta in ((0, o_meta), (1, d_meta)):
-                wp = waypoints[idx]
-                snap_distance = float(wp.get("distance", 0) or 0)
-                if snap_distance > 45.0:
-                    raise RuntimeError(
-                        f"Trainingspunt snapte {snap_distance:.0f} m weg van de gekozen lokale weg."
-                    )
+        if len(waypoints) < 2:
+            raise RuntimeError("Router gaf geen exacte begin/eind-waypoints terug.")
+
+        o_wp,d_wp=waypoints[0],waypoints[1]
+        o_loc=o_wp.get("location") or []
+        d_loc=d_wp.get("location") or []
+        if len(o_loc)<2 or len(d_loc)<2:
+            raise RuntimeError("Router-waypoint mist coördinaten.")
+
+        # Dit zijn de WERKELIJKE punten waar de route begint/eindigt.
+        o_lon,o_lat=float(o_loc[0]),float(o_loc[1])
+        d_lon,d_lat=float(d_loc[0]),float(d_loc[1])
+        o_stop_name=str(o_wp.get("name") or o_meta.get("road_name") or "route-stoppunt")
+        d_stop_name=str(d_wp.get("name") or d_meta.get("road_name") or "route-stoppunt")
+
+        o_target_stop=haversine_m(original_o_lat,original_o_lon,o_lat,o_lon)
+        d_target_stop=haversine_m(original_d_lat,original_d_lon,d_lat,d_lon)
+
+        # Een concrete bestemming die te ver van de route-stop ligt is geen
+        # geldige trainingsrit. Niet stilletjes ergens anders laten eindigen.
+        if o_target_stop>95.0:
+            raise RuntimeError(
+                f"Startlocatie ligt {o_target_stop:.0f} m van het echte route-stoppunt."
+            )
+        if d_target_stop>95.0:
+            raise RuntimeError(
+                f"Eindlocatie ligt {d_target_stop:.0f} m van het echte route-stoppunt."
+            )
 
         if o_meta.get("highway") in FORBIDDEN_ENDPOINT_CLASSES:
             raise RuntimeError("Startpunt ligt op een verboden wegklasse.")
         if d_meta.get("highway") in FORBIDDEN_ENDPOINT_CLASSES:
             raise RuntimeError("Eindpunt ligt op een verboden wegklasse.")
-        candidates = []
-        for route in data.get("routes", [])[:3]:
-            score, hits = route_score(route, corrections)
-            candidates.append((score, route, hits))
-        candidates.sort(key=lambda x: x[0])
-        score, chosen, hits = candidates[0]
-        alternatives = []
-        for s, r, h in candidates:
+
+        candidates=[]
+        for route in data.get("routes",[])[:3]:
+            coords=route.get("geometry",{}).get("coordinates",[])
+            if not coords:
+                continue
+            # Routegeometrie moet ook werkelijk bij het gerapporteerde
+            # eind-waypoint eindigen.
+            last=coords[-1]
+            geometry_gap=haversine_m(d_lat,d_lon,float(last[1]),float(last[0]))
+            if geometry_gap>12.0:
+                continue
+            score,hits=route_score(route,corrections)
+            candidates.append((score,route,hits))
+
+        if not candidates:
+            raise RuntimeError("Geen route eindigde betrouwbaar op het opgegeven route-stoppunt.")
+
+        candidates.sort(key=lambda x:x[0])
+        score,chosen,hits=candidates[0]
+        alternatives=[]
+        for s,r,h in candidates:
             alternatives.append({
-                "score": round(s, 1),
-                "distance_m": round(float(r.get("distance", 0)), 1),
-                "duration_s": round(float(r.get("duration", 0)), 1),
-                "correction_hits": h,
-                "geometry": r.get("geometry", {}).get("coordinates", []),
+                "score":round(s,1),
+                "distance_m":round(float(r.get("distance",0)),1),
+                "duration_s":round(float(r.get("duration",0)),1),
+                "correction_hits":h,
+                "geometry":r.get("geometry",{}).get("coordinates",[]),
             })
-        row = (
-            batch_id, o_name, o_lat, o_lon, d_name, d_lat, d_lon,
-            float(chosen.get("distance", 0)), float(chosen.get("duration", 0)),
-            float(score), len(hits),
-            json.dumps(chosen.get("geometry", {}).get("coordinates", []), separators=(",", ":")),
-            json.dumps(alternatives, separators=(",", ":")),
-            "new", "", "", created,
+
+        row=(
+            batch_id,
+            original_o_name,o_lat,o_lon,
+            original_d_name,d_lat,d_lon,
+            original_o_lat,original_o_lon,
+            original_d_lat,original_d_lon,
+            o_stop_name,d_stop_name,
+            o_target_stop,d_target_stop,
+            "3.3.2",
+            float(chosen.get("distance",0)),float(chosen.get("duration",0)),
+            float(score),len(hits),
+            json.dumps(chosen.get("geometry",{}).get("coordinates",[]),separators=(",",":")),
+            json.dumps(alternatives,separators=(",",":")),
+            "new","","",created,
         )
     except Exception as exc:
-        row = (
-            batch_id, o_name, o_lat, o_lon, d_name, d_lat, d_lon,
-            0, 0, 0, 0, "[]", "[]", "error", "", str(exc)[:500], created,
+        row=(
+            batch_id,
+            original_o_name,o_lat,o_lon,
+            original_d_name,d_lat,d_lon,
+            original_o_lat,original_o_lon,
+            original_d_lat,original_d_lon,
+            o_stop_name,d_stop_name,
+            o_target_stop,d_target_stop,
+            "3.3.2",
+            0,0,0,0,"[]","[]","error","",str(exc)[:500],created,
         )
-    with db_lock, db() as con:
+
+    with db_lock,db() as con:
         con.execute(
             """INSERT INTO scenarios(
             batch_id,origin_name,origin_lat,origin_lon,destination_name,destination_lat,destination_lon,
-            distance_m,duration_s,score,correction_hits,geometry_json,alternatives_json,status,review_note,error,created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            origin_target_lat,origin_target_lon,destination_target_lat,destination_target_lon,
+            origin_stop_name,destination_stop_name,origin_target_to_stop_m,destination_target_to_stop_m,
+            generator_version,distance_m,duration_s,score,correction_hits,geometry_json,
+            alternatives_json,status,review_note,error,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             row,
         )
 
 
 def simulate_batch(count, seed):
-    count = max(1, min(200, int(count)))
-    rng = random.Random(seed)
-    batch_id = f"sim-{int(time.time())}-{rng.randint(1000,9999)}"
-    pairs = []
-    used = set()
-    while len(pairs) < count:
-        a, b = rng.sample(range(len(ANCHORS)), 2)
-        key = (a, b)
+    count=max(1,min(200,int(count)))
+    rng=random.Random(seed)
+    batch_id=f"sim-{int(time.time())}-{rng.randint(1000,9999)}"
+
+    locations=build_training_location_pool(rng,count)
+    pairs=[]
+    used=set()
+    max_pairs=len(locations)*(len(locations)-1)
+    attempts=0
+    while len(pairs)<count and attempts<max(2000,count*80):
+        attempts+=1
+        a,b=rng.sample(range(len(locations)),2)
+        key=(a,b)
         if key in used:
             continue
+        origin,destination=locations[a],locations[b]
+        direct=haversine_m(origin[1],origin[2],destination[1],destination[2])
+        if direct<700.0 or direct>32000.0:
+            continue
         used.add(key)
-        pairs.append((ANCHORS[a], ANCHORS[b]))
-    corrections = active_corrections()
-    workers = max(1, min(6, int(os.environ.get("ROUTEPILOT_SIM_WORKERS", "4"))))
+        pairs.append((origin,destination))
+
+    if len(pairs)<count:
+        raise RuntimeError(
+            f"Slechts {len(pairs)} betrouwbare concrete ritparen gevonden; gevraagd: {count}."
+        )
+
+    corrections=active_corrections()
+    workers=max(1,min(6,int(os.environ.get("ROUTEPILOT_SIM_WORKERS","4"))))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(simulate_pair, batch_id, a, b, corrections) for a, b in pairs]
+        futures=[pool.submit(simulate_pair,batch_id,a,b,corrections) for a,b in pairs]
         for f in as_completed(futures):
             f.result()
     return batch_id
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.3.1"
+    server_version = "RoutePilotSimulator/3.3.2"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -463,7 +686,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.3.1", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.3.2", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/corrections" or path == "/api/corrections/export":
             return self.send_json({"version": 1, "generated_at": now_ms(), "corrections": active_corrections()})
@@ -487,7 +710,14 @@ class Handler(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(parsed.query)
             limit = max(1, min(500, int(q.get("limit", ["150"])[0])))
             with db_lock, db() as con:
-                rows = con.execute("SELECT * FROM scenarios ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+                include_legacy = q.get("include_legacy", ["0"])[0] == "1"
+                if include_legacy:
+                    rows = con.execute("SELECT * FROM scenarios ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+                else:
+                    rows = con.execute(
+                        "SELECT * FROM scenarios WHERE generator_version<>'legacy' ORDER BY id DESC LIMIT ?",
+                        (limit,)
+                    ).fetchall()
             out = []
             for r in rows:
                 d = dict(r)
@@ -498,10 +728,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stats":
             with db_lock, db() as con:
-                total = con.execute("SELECT COUNT(*) FROM scenarios").fetchone()[0]
-                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE status='accepted'").fetchone()[0]
-                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE status='rejected'").fetchone()[0]
-                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE status='error'").fetchone()[0]
+                total = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy'").fetchone()[0]
+                accepted = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy' AND status='accepted'").fetchone()[0]
+                rejected = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy' AND status='rejected'").fetchone()[0]
+                errors = con.execute("SELECT COUNT(*) FROM scenarios WHERE generator_version<>'legacy' AND status='error'").fetchone()[0]
                 corrections = con.execute("SELECT COUNT(*) FROM corrections WHERE active=1").fetchone()[0]
                 driver_trips = con.execute("SELECT COUNT(*) FROM driver_trips").fetchone()[0]
             return self.send_json({
@@ -660,7 +890,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.3.1 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.3.2 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
