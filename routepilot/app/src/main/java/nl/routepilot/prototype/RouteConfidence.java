@@ -27,6 +27,27 @@ public final class RouteConfidence {
         Result r = new Result();
         int score = 100;
 
+        if (p.route.providerVehicleAware) {
+            r.reasons.add(p.route.providerName + " voertuigbewuste routering actief");
+        } else {
+            score -= 6;
+            r.reasons.add(p.route.providerName + " generieke basisroutering");
+        }
+
+        if (p.route.providerCriticalNotices > 0) {
+            score -= 35;
+            r.reasons.add("router meldt kritieke voertuigrestrictie");
+        }
+
+        if (RoutingProviderSettings.load(context).ndwAccessibility) {
+            if (p.route.ndwAccessibilityChecked) {
+                r.reasons.add("officiële NDW Bereikbaarheidskaart gecontroleerd");
+            } else {
+                score -= 10;
+                r.reasons.add("NDW Bereikbaarheidskaart niet beschikbaar voor deze route");
+            }
+        }
+
         if (!p.vehicleScanOk) {
             score -= 22;
             r.reasons.add("OSM-voertuigscan niet volledig beschikbaar");
