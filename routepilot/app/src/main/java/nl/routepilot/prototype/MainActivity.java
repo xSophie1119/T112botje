@@ -50,10 +50,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private static final int NOTIFICATION_REQUEST = 2003;
     private static final Locale NL = new Locale("nl", "NL");
 
-    private final int BG = Color.rgb(9, 15, 27);
-    private final int PANEL = Color.rgb(17, 27, 44);
-    private final int PANEL_2 = Color.rgb(24, 37, 58);
-    private final int TEXT = Color.rgb(241, 245, 249);
+    private final int BG = Color.rgb(6, 11, 19);
+    private final int PANEL = Color.rgb(14, 23, 37);
+    private final int PANEL_2 = Color.rgb(22, 34, 52);
+    private final int TEXT = Color.rgb(248, 250, 252);
     private final int MUTED = Color.rgb(148, 163, 184);
     private final int BLUE = Color.rgb(56, 189, 248);
     private final int GREEN = Color.rgb(74, 222, 128);
@@ -88,6 +88,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private double currentStepDistance = 0;
     private String currentInstruction = "Volg de route";
     private String currentWarning = "";
+    private long lastPreparationMs = 0L;
     private LookAheadEngine.Result currentLookAhead = new LookAheadEngine.Result();
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -166,7 +167,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         ScrollView scroll = new ScrollView(this);
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(16), dp(12), dp(16), dp(24));
+        panel.setPadding(dp(14), dp(12), dp(14), dp(28));
         panel.setBackgroundColor(BG);
         scroll.addView(panel);
 
@@ -203,12 +204,15 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(8), dp(8), dp(8));
+        row.setBackground(cardDrawable(PANEL, Color.rgb(35, 52, 74), 18));
+        row.setElevation(dp(2));
 
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
-        titles.addView(text("ROUTEPILOT", 14, BLUE, Typeface.BOLD));
-        titles.addView(text("V3 debug • rolstoelbus-navigatie", 11, MUTED, Typeface.NORMAL));
-        row.addView(titles, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        titles.addView(text("ROUTEPILOT", 16, BLUE, Typeface.BOLD));
+        titles.addView(text("V3.1 • WMO NAVIGATION", 10, MUTED, Typeface.BOLD));
+        row.addView(titles, new LinearLayout.LayoutParams(0, dp(52), 1f));
 
         Button dashboard = darkButton("▦");
         dashboard.setContentDescription("Dashboard");
@@ -232,17 +236,19 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         panel.addView(row);
 
         gpsStatus = text("Locatie wordt gestart…", 11, MUTED, Typeface.NORMAL);
-        gpsStatus.setPadding(0, 0, 0, dp(6));
+        gpsStatus.setPadding(dp(4), dp(8), 0, dp(3));
         panel.addView(gpsStatus);
 
         vehicleSummary = text("", 11, GREEN, Typeface.BOLD);
-        vehicleSummary.setPadding(0, 0, 0, dp(8));
+        vehicleSummary.setPadding(dp(4), 0, 0, dp(10));
         panel.addView(vehicleSummary);
     }
 
     private void buildSearch(LinearLayout panel) {
         searchArea = new LinearLayout(this);
         searchArea.setOrientation(LinearLayout.VERTICAL);
+        searchArea.setPadding(dp(10), dp(10), dp(10), dp(10));
+        searchArea.setBackground(cardDrawable(PANEL, Color.rgb(31, 47, 68), 18));
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -251,16 +257,16 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         destinationInput.setHint("Adres, woning, zorglocatie of plaats");
         destinationInput.setHintTextColor(MUTED);
         destinationInput.setTextColor(TEXT);
-        destinationInput.setTextSize(15);
+        destinationInput.setTextSize(16);
         destinationInput.setSingleLine(true);
         destinationInput.setPadding(dp(13), 0, dp(10), 0);
-        destinationInput.setBackground(rounded(PANEL, 13));
+        destinationInput.setBackground(cardDrawable(PANEL_2, Color.rgb(39, 56, 78), 14));
 
-        routeButton = smallButton("Route");
+        routeButton = smallButton("Plan →");
         routeButton.setOnClickListener(v -> searchAndRoute());
 
-        row.addView(destinationInput, new LinearLayout.LayoutParams(0, dp(50), 1f));
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(88), dp(50));
+        row.addView(destinationInput, new LinearLayout.LayoutParams(0, dp(54), 1f));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(96), dp(54));
         bp.leftMargin = dp(8);
         row.addView(routeButton, bp);
 
@@ -287,9 +293,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         previewArea.setOrientation(LinearLayout.VERTICAL);
         previewArea.setVisibility(View.GONE);
         previewArea.setPadding(dp(13), dp(12), dp(13), dp(13));
-        previewArea.setBackground(rounded(PANEL, 15));
+        previewArea.setBackground(cardDrawable(PANEL, Color.rgb(38, 57, 80), 18));
 
-        routeTitle = text("Nog geen route", 20, TEXT, Typeface.BOLD);
+        routeTitle = text("Nog geen route", 23, TEXT, Typeface.BOLD);
         previewArea.addView(routeTitle);
 
         routeMeta = text("", 12, MUTED, Typeface.NORMAL);
@@ -298,7 +304,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         warningText = text("", 12, TEXT, Typeface.NORMAL);
         warningText.setPadding(dp(10), dp(9), dp(10), dp(9));
-        warningText.setBackground(rounded(PANEL_2, 11));
+        warningText.setBackground(cardDrawable(PANEL_2, Color.rgb(39, 56, 78), 13));
         previewArea.addView(warningText);
 
         LinearLayout row1 = new LinearLayout(this);
@@ -342,16 +348,16 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         navArea.setOrientation(LinearLayout.VERTICAL);
         navArea.setVisibility(View.GONE);
         navArea.setPadding(dp(14), dp(13), dp(14), dp(13));
-        navArea.setBackground(rounded(PANEL, 15));
+        navArea.setBackground(cardDrawable(PANEL, Color.rgb(38, 57, 80), 18));
 
         navStatus = text("NAVIGATIE ACTIEF", 11, GREEN, Typeface.BOLD);
         navArea.addView(navStatus);
 
-        navDistance = text("—", 31, BLUE, Typeface.BOLD);
+        navDistance = text("—", 38, BLUE, Typeface.BOLD);
         navDistance.setPadding(0, dp(3), 0, 0);
         navArea.addView(navDistance);
 
-        navInstruction = text("Volg de route", 22, TEXT, Typeface.BOLD);
+        navInstruction = text("Volg de route", 25, TEXT, Typeface.BOLD);
         navInstruction.setPadding(0, 0, 0, dp(5));
         navArea.addView(navInstruction);
 
@@ -361,13 +367,13 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         navSpeed = text("MAX —", 16, TEXT, Typeface.BOLD);
         navSpeed.setGravity(Gravity.CENTER);
         navSpeed.setPadding(dp(8), dp(7), dp(8), dp(7));
-        navSpeed.setBackground(rounded(PANEL_2, 10));
+        navSpeed.setBackground(cardDrawable(PANEL_2, Color.rgb(39, 56, 78), 12));
         gauges.addView(navSpeed, new LinearLayout.LayoutParams(0, dp(42), 1f));
 
         navScore = text("ROUTE —", 13, GREEN, Typeface.BOLD);
         navScore.setGravity(Gravity.CENTER);
         navScore.setPadding(dp(8), dp(7), dp(8), dp(7));
-        navScore.setBackground(rounded(PANEL_2, 10));
+        navScore.setBackground(cardDrawable(PANEL_2, Color.rgb(39, 56, 78), 12));
         LinearLayout.LayoutParams gp = new LinearLayout.LayoutParams(0, dp(42), 1f);
         gp.leftMargin = dp(7);
         gauges.addView(navScore, gp);
@@ -418,16 +424,16 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         wmoArea = new LinearLayout(this);
         wmoArea.setOrientation(LinearLayout.VERTICAL);
         wmoArea.setPadding(dp(13), dp(11), dp(13), dp(12));
-        wmoArea.setBackground(rounded(PANEL, 15));
+        wmoArea.setBackground(cardDrawable(PANEL, Color.rgb(38, 57, 80), 18));
 
         TextView label = text("WMO TILBURG", 10, BLUE, Typeface.BOLD);
         wmoArea.addView(label);
 
-        wmoPhaseText = text("WMO gereed", 17, TEXT, Typeface.BOLD);
+        wmoPhaseText = text("WMO gereed", 20, TEXT, Typeface.BOLD);
         wmoPhaseText.setPadding(0, dp(3), 0, 0);
         wmoArea.addView(wmoPhaseText);
 
-        waitTimerText = text("", 28, ORANGE, Typeface.BOLD);
+        waitTimerText = text("", 34, ORANGE, Typeface.BOLD);
         waitTimerText.setPadding(0, dp(2), 0, dp(4));
         wmoArea.addView(waitTimerText);
 
@@ -496,6 +502,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                     }
                     RoutePilotState.updateWmo(MainActivity.this,
                             s.phaseLabel(), left, left <= 0);
+                    if (mapStatusPill != null) {
+                        mapStatusPill.setText(left > 0
+                                ? "WMO WACHT • " + WmoSessionManager.formatWait(left)
+                                : "WMO • LOOS MOGELIJK");
+                        mapStatusPill.setTextColor(left > 0 ? ORANGE : RED);
+                    }
                 } else {
                     waitTimerText.setText("");
                     waitMinuteAnnounced = false;
@@ -699,6 +711,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             currentConfidence = prepared.confidence;
             currentArrival = prepared.arrival;
             currentDestinationAccess = prepared.destinationAccess;
+            lastPreparationMs = prepared.preparationMs;
             DestinationStore.addRecent(this, destination.toStoredItem());
             refreshSavedPlaces();
 
@@ -721,7 +734,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         String side = currentAnalysis.destinationOnRight
                 ? "rechterdeur aan ingangzijde ✓"
                 : "normale aankomstzijde • rechterdeurvoorkeur niet toegepast";
-        String meta = shortLabel(currentDestination.label) + " • " + side;
+        String meta = shortLabel(currentDestination.label) + " • " + side
+                + String.format(NL, "\n⚡ analyse %.2f s", lastPreparationMs / 1000.0);
         if (!currentRoute.selectionNote.isEmpty()) meta += "\n" + currentRoute.selectionNote;
         if (note != null && !note.isEmpty()) meta += "\n" + note;
         routeMeta.setText(meta);
@@ -738,6 +752,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                         ? "★ Favoriet" : "☆ Favoriet");
         previewArea.setVisibility(View.VISIBLE);
         startButton.setEnabled(true);
+        if (mapStatusPill != null) {
+            mapStatusPill.setText(String.format(NL, "✓ ROUTE KLAAR • %.1f s", lastPreparationMs / 1000.0));
+            mapStatusPill.setTextColor(GREEN);
+        }
     }
 
     private String buildRouteSummary() {
@@ -813,6 +831,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         savedPlaces.setVisibility(View.GONE);
         previewArea.setVisibility(View.GONE);
         navArea.setVisibility(View.VISIBLE);
+        if (mapStatusPill != null) {
+            mapStatusPill.setText("● WMO NAVIGATIE");
+            mapStatusPill.setTextColor(GREEN);
+        }
 
         RoutePilotStore.beginTrip(this, currentDestination.label, currentRoute.distanceMeters);
         RoutePilotStore.savePlannedRoute(this, currentRoute.points);
@@ -1704,10 +1726,14 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private void setRouteLoading(boolean loading) {
         routeLoading = loading;
         routeButton.setEnabled(!loading);
-        routeButton.setText(loading ? "…" : "Route");
+        routeButton.setText(loading ? "…" : "Plan →");
         if (loading && !navigating) {
             previewArea.setVisibility(View.VISIBLE);
-            routeMeta.setText("OSRM + OSM + NDW + Tilburg-profiel worden gecontroleerd…");
+            routeMeta.setText("Snelle route wordt opgebouwd • veiligheidslagen parallel…");
+            if (mapStatusPill != null) {
+                mapStatusPill.setText("⚡ ROUTE BEREKENEN");
+                mapStatusPill.setTextColor(BLUE);
+            }
             startButton.setEnabled(false);
         }
     }
@@ -1778,9 +1804,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private Button smallButton(String label) {
         Button b = new Button(this);
-        b.setText(label); b.setTextSize(13); b.setTextColor(Color.rgb(3, 18, 28));
+        b.setText(label); b.setTextSize(13); b.setTextColor(Color.rgb(2, 17, 27));
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setAllCaps(false);
-        b.setBackground(rounded(BLUE, 13));
+        b.setStateListAnimator(null); b.setElevation(dp(2));
+        b.setPadding(dp(10), 0, dp(10), 0);
+        b.setBackground(cardDrawable(BLUE, Color.rgb(125, 211, 252), 14));
         return b;
     }
 
@@ -1788,7 +1816,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         Button b = new Button(this);
         b.setText(label); b.setTextSize(12); b.setTextColor(TEXT);
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setAllCaps(false);
-        b.setBackground(rounded(PANEL_2, 13));
+        b.setStateListAnimator(null);
+        b.setPadding(dp(8), 0, dp(8), 0);
+        b.setBackground(cardDrawable(PANEL_2, Color.rgb(43, 61, 84), 14));
         return b;
     }
 
@@ -1796,7 +1826,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         Button b = new Button(this);
         b.setText(label); b.setTextSize(12); b.setTextColor(TEXT);
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setAllCaps(false);
-        b.setBackground(rounded(Color.rgb(105, 32, 42), 13));
+        b.setStateListAnimator(null);
+        b.setBackground(cardDrawable(Color.rgb(92, 30, 42), Color.rgb(160, 56, 72), 14));
         return b;
     }
 
@@ -1811,6 +1842,20 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         android.graphics.drawable.GradientDrawable d =
                 new android.graphics.drawable.GradientDrawable();
         d.setColor(color); d.setCornerRadius(dp(radiusDp));
+        return d;
+    }
+
+    private android.graphics.drawable.GradientDrawable cardDrawable(
+            int fill, int stroke, int radiusDp) {
+        android.graphics.drawable.GradientDrawable d =
+                new android.graphics.drawable.GradientDrawable(
+                        android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+                        new int[]{fill, Color.rgb(
+                                Math.min(255, Color.red(fill) + 4),
+                                Math.min(255, Color.green(fill) + 6),
+                                Math.min(255, Color.blue(fill) + 9))});
+        d.setCornerRadius(dp(radiusDp));
+        d.setStroke(dp(1), stroke);
         return d;
     }
 
