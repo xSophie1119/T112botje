@@ -273,6 +273,15 @@ public final class RoutePilotStore {
         return n;
     }
 
+    public static synchronized LearnedPoint firstPendingLearning(Context c){
+        LearnedPoint best=null;
+        for(LearnedPoint p:learned(c)){
+            if(p.confirmed || p.count<3) continue;
+            if(best==null || p.lastSeenAt>best.lastSeenAt) best=p;
+        }
+        return best;
+    }
+
     public static synchronized String beginTrip(Context c,String destination,double plannedDistanceM){
         String id=Long.toString(System.currentTimeMillis());
         try{
