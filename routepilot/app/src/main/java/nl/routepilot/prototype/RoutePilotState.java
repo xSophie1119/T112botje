@@ -66,6 +66,17 @@ public final class RoutePilotState {
         return out;
     }
 
+    public static void savePlan(Context c, OnlineServices.RouteResult route,
+                                OnlineServices.SearchResult destination) {
+        if (route == null || destination == null) return;
+        c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
+                .putLong("planDistance",Double.doubleToRawLongBits(route.distanceMeters))
+                .putLong("planDuration",Double.doubleToRawLongBits(route.durationSeconds))
+                .putLong("destLat",Double.doubleToRawLongBits(destination.lat))
+                .putLong("destLon",Double.doubleToRawLongBits(destination.lon))
+                .apply();
+    }
+
     public static void updatePosition(Context c,double lat,double lon){
         c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
                 .putLong("lat",Double.doubleToRawLongBits(lat))
@@ -103,6 +114,10 @@ public final class RoutePilotState {
         s.lookAhead=p.getString("lookAhead","");
         s.arrival=p.getString("arrival","");
         s.confidence=p.getString("confidence","");
+        s.planDistanceM=Double.longBitsToDouble(p.getLong("planDistance",Double.doubleToRawLongBits(0)));
+        s.planDurationS=Double.longBitsToDouble(p.getLong("planDuration",Double.doubleToRawLongBits(0)));
+        s.destLat=Double.longBitsToDouble(p.getLong("destLat",Double.doubleToRawLongBits(0)));
+        s.destLon=Double.longBitsToDouble(p.getLong("destLon",Double.doubleToRawLongBits(0)));
         s.lat=Double.longBitsToDouble(p.getLong("lat",Double.doubleToRawLongBits(0)));
         s.lon=Double.longBitsToDouble(p.getLong("lon",Double.doubleToRawLongBits(0)));
         s.stepDistanceM=Double.longBitsToDouble(p.getLong("stepDistance",Double.doubleToRawLongBits(0)));
@@ -117,6 +132,7 @@ public final class RoutePilotState {
         public boolean wmoWaitExpired;
         public long wmoWaitRemainingMs;
         public double stepDistanceM,remainingM;
+        public double planDistanceM,planDurationS,destLat,destLon;
         public long etaMs;
         public int speedLimit,safetyScore;
         public double lat,lon;
