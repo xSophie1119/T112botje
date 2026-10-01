@@ -1877,16 +1877,21 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     @Override protected void onResume() {
         super.onResume();
+        RoutePilotState.setActivityForeground(this, true);
         if (map != null) map.onResume();
         applyAutoNightMode();
+        updateWmoPanel();
     }
 
     @Override protected void onPause() {
+        RoutePilotState.setActivityForeground(this, false);
         if (map != null) map.onPause();
         super.onPause();
     }
 
     @Override protected void onDestroy() {
+        RoutePilotState.setActivityForeground(this, false);
+        uiHandler.removeCallbacks(waitTicker);
         try { if (locationManager != null) locationManager.removeUpdates(this); }
         catch (Exception ignored) {}
         if (tts != null) { tts.stop(); tts.shutdown(); }
