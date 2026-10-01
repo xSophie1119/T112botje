@@ -192,7 +192,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         buildWmoPanel(panel);
 
         TextView disclaimer = text(
-                "RoutePilot V2 debug • OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
+                "RoutePilot V3 debug • OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
                 10, MUTED, Typeface.NORMAL);
         disclaimer.setGravity(Gravity.CENTER);
         disclaimer.setPadding(0, dp(12), 0, 0);
@@ -217,7 +217,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
         titles.addView(text("ROUTEPILOT", 14, BLUE, Typeface.BOLD));
-        titles.addView(text("V2 debug • rolstoelbus-navigatie", 11, MUTED, Typeface.NORMAL));
+        titles.addView(text("V3 debug • rolstoelbus-navigatie", 11, MUTED, Typeface.NORMAL));
         row.addView(titles, new LinearLayout.LayoutParams(0, dp(48), 1f));
 
         Button dashboard = darkButton("▦");
@@ -1847,7 +1847,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private void speak(String message) {
         if (tts != null && message != null && !message.trim().isEmpty())
-            tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "routepilot-v2");
+            tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "routepilot-v3");
     }
 
     @Override
