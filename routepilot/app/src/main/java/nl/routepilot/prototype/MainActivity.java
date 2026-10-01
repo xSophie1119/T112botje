@@ -611,6 +611,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         navArea.setVisibility(View.VISIBLE);
 
         RoutePilotStore.beginTrip(this, currentDestination.label, currentRoute.distanceMeters);
+        RoutePilotStore.savePlannedRoute(this, currentRoute.points);
         RoutePilotState.saveRoute(this, currentRoute);
         RoutePilotState.update(this, true, "Navigatie gestart", "", 0,
                 currentRoute.distanceMeters,
@@ -862,6 +863,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         drawCurrentRoute();
         showDestinationMarker();
         RoutePilotState.saveRoute(this, currentRoute);
+        RoutePilotStore.savePlannedRoute(this, currentRoute.points);
 
         announcedApproachSteps.clear();
         announcedNearSteps.clear();
@@ -1021,35 +1023,54 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             return;
         }
         RoutePilotStore.Trip t = trips.get(0);
-        List<GeoPoint> pts = new ArrayList<>();
-        try {
-            for (int i = 0; i < t.points.length(); i++) {
-                JSONArray p = t.points.getJSONArray(i);
-                pts.add(new GeoPoint(p.getDouble(0), p.getDouble(1)));
-            }
-        } catch (Exception ignored) {}
+        List<GeoPoint> actual = jsonPoints(t.points);
+        List<GeoPoint> planned = jsonPoints(t.plannedPoints);
 
-        if (pts.size() < 2) {
+        if (actual.size() < 2) {
             Toast.makeText(this, "Voor deze rit zijn te weinig GPS-punten opgeslagen.", Toast.LENGTH_SHORT).show();
             return;
         }
 
         if (replayLine != null) map.getOverlays().remove(replayLine);
         replayLine = new Polyline(map);
-        replayLine.setPoints(pts);
+        replayLine.setPoints(actual);
         replayLine.getOutlinePaint().setColor(ORANGE);
         replayLine.getOutlinePaint().setStrokeWidth(dp(7));
         map.getOverlays().add(replayLine);
-        fitRoute(pts);
+
+        if (routeLine != null) map.getOverlays().remove(routeLine);
+        if (planned.size() >= 2) {
+            routeLine = new Polyline(map);
+            routeLine.setPoints(planned);
+            routeLine.getOutlinePaint().setColor(BLUE);
+            routeLine.getOutlinePaint().setStrokeWidth(dp(5));
+            map.getOverlays().add(routeLine);
+        }
+
+        List<GeoPoint> bounds = new ArrayList<>(actual);
+        bounds.addAll(planned);
+        fitRoute(bounds);
         map.invalidate();
 
         new AlertDialog.Builder(this)
                 .setTitle("Laatste rit replay")
-                .setMessage(t.destinationLabel + "\n"
+                .setMessage(t.destinationLabel + "\n\nBlauw = gepland\nOranje = werkelijk gereden\n\n"
                         + String.format(NL, "%.1f km gereden • %d herrouteringen • %d waarschuwingen",
                         t.actualDistanceM / 1000.0, t.reroutes, t.warnings))
                 .setPositiveButton("OK", null)
                 .show();
+    }
+
+    private List<GeoPoint> jsonPoints(JSONArray arr) {
+        List<GeoPoint> out = new ArrayList<>();
+        if (arr == null) return out;
+        try {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONArray p = arr.getJSONArray(i);
+                out.add(new GeoPoint(p.getDouble(0), p.getDouble(1)));
+            }
+        } catch (Exception ignored) {}
+        return out;
     }
 
     private void drawCurrentRoute() {
