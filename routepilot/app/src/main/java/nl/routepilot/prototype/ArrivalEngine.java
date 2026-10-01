@@ -84,7 +84,7 @@ public final class ArrivalEngine {
             out.warnings.add("Controleer vóór uitklappen van de lift altijd fietspad, verkeer en vrije ruimte.");
         } else {
             out.liftMessage = "Achterliftruimte nog niet bevestigd. RoutePilot rekent conservatief met "
-                    + String.format(java.util.Locale.NL, "%.1f m", vehicle.rearLiftClearanceM)
+                    + String.format(new java.util.Locale("nl","NL"), "%.1f m", vehicle.rearLiftClearanceM)
                     + " vrije ruimte achter de bus.";
         }
 
