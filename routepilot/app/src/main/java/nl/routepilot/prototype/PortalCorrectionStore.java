@@ -134,6 +134,19 @@ public final class PortalCorrectionStore {
         return Math.max(-20, Math.min(90, adjustment));
     }
 
+    public static int hardHitCount(Context c, List<GeoPoint> route) {
+        if (route == null || route.isEmpty()) return 0;
+        int n = 0;
+        for (Correction x : all(c)) {
+            if (!("road_closed".equals(x.type)
+                    || "bus_trap".equals(x.type)
+                    || "height_block".equals(x.type)
+                    || "too_narrow".equals(x.type))) continue;
+            if (minDistance(route, x.lat, x.lon) <= x.radiusM) n++;
+        }
+        return n;
+    }
+
     public static boolean ignoreDoorSide(Context c, double lat, double lon) {
         return hasTypeNear(c, "ignore_door_side", lat, lon);
     }
