@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 import org.osmdroid.util.GeoPoint;
 
 import java.util.ArrayList;
@@ -49,8 +50,27 @@ public final class RoutePilotState {
                 arr.put(pt);
             }
         } catch (Exception ignored) {}
+        JSONArray steps = new JSONArray();
+        try {
+            if (route.steps != null) {
+                for (OnlineServices.NavStep s : route.steps) {
+                    JSONObject o = new JSONObject();
+                    o.put("lat", s.lat);
+                    o.put("lon", s.lon);
+                    o.put("distanceMeters", s.distanceMeters);
+                    o.put("instruction", s.instruction);
+                    o.put("roadName", s.roadName);
+                    o.put("maneuverType", s.maneuverType);
+                    o.put("modifier", s.modifier);
+                    steps.put(o);
+                }
+            }
+        } catch (Exception ignored) {}
+
         c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
-                .putString("route_geometry",arr.toString()).apply();
+                .putString("route_geometry",arr.toString())
+                .putString("route_steps",steps.toString())
+                .apply();
     }
 
     public static List<GeoPoint> loadRoute(Context c) {
@@ -64,6 +84,36 @@ public final class RoutePilotState {
             }
         } catch(Exception ignored){}
         return out;
+    }
+
+    public static List<OnlineServices.NavStep> loadSteps(Context c) {
+        List<OnlineServices.NavStep> out = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(c.getSharedPreferences(PREFS,Context.MODE_PRIVATE)
+                    .getString("route_steps","[]"));
+            for (int i=0;i<arr.length();i++) {
+                JSONObject o=arr.getJSONObject(i);
+                out.add(new OnlineServices.NavStep(
+                        o.optDouble("lat"),o.optDouble("lon"),
+                        o.optDouble("distanceMeters"),
+                        o.optString("instruction","Volg de route"),
+                        o.optString("roadName",""),
+                        o.optString("maneuverType",""),
+                        o.optString("modifier","")
+                ));
+            }
+        } catch(Exception ignored){}
+        return out;
+    }
+
+    public static void setActivityForeground(Context c, boolean foreground) {
+        c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
+                .putBoolean("activityForeground",foreground).apply();
+    }
+
+    public static boolean isActivityForeground(Context c) {
+        return c.getSharedPreferences(PREFS,Context.MODE_PRIVATE)
+                .getBoolean("activityForeground",false);
     }
 
     public static void savePlan(Context c, OnlineServices.RouteResult route,
