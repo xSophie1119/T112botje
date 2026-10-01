@@ -82,6 +82,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private final Set<Integer> announcedApproachSteps = new HashSet<>();
     private final Set<Integer> announcedNearSteps = new HashSet<>();
     private final Set<Integer> announcedRestrictions = new HashSet<>();
+    private final Set<Integer> announcedTrafficEvents = new HashSet<>();
 
     private EditText destinationInput;
     private TextView gpsStatus;
@@ -465,33 +466,76 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         OnlineServices.RouteResult selected = candidates.get(0);
         String scanNote = "";
 
+        boolean vehicleScanOk = true;
+        boolean trafficScanOk = true;
+
         try {
             selected.restrictions = OnlineServices.scanRestrictions(selected, vehicle);
-
-            if (selected.criticalCount() > 0 && candidates.size() > 1) {
-                OnlineServices.RouteResult alternative = candidates.get(1);
-                alternative.restrictions = OnlineServices.scanRestrictions(alternative, vehicle);
-                OnlineServices.RouteResult safer =
-                        OnlineServices.chooseSafer(selected, alternative);
-
-                if (safer == alternative) {
-                    safer.selectionNote = "Alternatieve route gekozen na voertuigscan.";
-                    selected = safer;
-                }
-
-                if (selected.criticalCount() > 0 && candidates.size() > 2) {
-                    OnlineServices.RouteResult third = candidates.get(2);
-                    third.restrictions = OnlineServices.scanRestrictions(third, vehicle);
-                    OnlineServices.RouteResult saferAgain =
-                            OnlineServices.chooseSafer(selected, third);
-                    if (saferAgain == third) {
-                        saferAgain.selectionNote = "Derde route gekozen na voertuigscan.";
-                        selected = saferAgain;
-                    }
-                }
-            }
         } catch (Exception scanError) {
+            vehicleScanOk = false;
+        }
+
+        try {
+            selected.trafficEvents = LiveTrafficService.eventsNearRoute(selected.points);
+        } catch (Exception trafficError) {
+            trafficScanOk = false;
+        }
+
+        if ((selected.criticalCount() > 0 || selected.liveClosureCount() > 0)
+                && candidates.size() > 1) {
+            OnlineServices.RouteResult alternative = candidates.get(1);
+
+            try {
+                alternative.restrictions = OnlineServices.scanRestrictions(alternative, vehicle);
+            } catch (Exception scanError) {
+                vehicleScanOk = false;
+            }
+
+            try {
+                alternative.trafficEvents = LiveTrafficService.eventsNearRoute(alternative.points);
+            } catch (Exception trafficError) {
+                trafficScanOk = false;
+            }
+
+            OnlineServices.RouteResult safer =
+                    OnlineServices.chooseSafer(selected, alternative);
+
+            if (safer == alternative) {
+                safer.selectionNote = "Alternatieve route gekozen door live route- en voertuigscan.";
+                selected = safer;
+            }
+        }
+
+        if ((selected.criticalCount() > 0 || selected.liveClosureCount() > 0)
+                && candidates.size() > 2) {
+            OnlineServices.RouteResult third = candidates.get(2);
+
+            try {
+                third.restrictions = OnlineServices.scanRestrictions(third, vehicle);
+            } catch (Exception scanError) {
+                vehicleScanOk = false;
+            }
+
+            try {
+                third.trafficEvents = LiveTrafficService.eventsNearRoute(third.points);
+            } catch (Exception trafficError) {
+                trafficScanOk = false;
+            }
+
+            OnlineServices.RouteResult saferAgain =
+                    OnlineServices.chooseSafer(selected, third);
+            if (saferAgain == third) {
+                saferAgain.selectionNote = "Derde route gekozen door live route- en voertuigscan.";
+                selected = saferAgain;
+            }
+        }
+
+        if (!vehicleScanOk && !trafficScanOk) {
+            scanNote = "Voertuigscan en actuele NDW-afsluitingen tijdelijk niet volledig beschikbaar.";
+        } else if (!vehicleScanOk) {
             scanNote = "Voertuigscan tijdelijk niet volledig beschikbaar.";
+        } else if (!trafficScanOk) {
+            scanNote = "Actuele NDW-afsluitingen tijdelijk niet volledig beschikbaar.";
         }
 
         final OnlineServices.RouteResult finalRoute = selected;
@@ -543,6 +587,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private String buildRestrictionSummary(String scanNote) {
         int critical = currentRoute == null ? 0 : currentRoute.criticalCount();
         int caution = currentRoute == null ? 0 : currentRoute.cautionCount();
+        int closures = currentRoute == null ? 0 : currentRoute.liveClosureCount();
         int info = 0;
         if (currentRoute != null) {
             for (OnlineServices.Restriction r : currentRoute.restrictions) {
@@ -552,11 +597,23 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         StringBuilder sb = new StringBuilder();
 
+        if (closures > 0) {
+            sb.append("🚧 NDW ACTUEEL: ").append(closures)
+                    .append(closures == 1 ? " afsluiting langs deze route." : " afsluitingen langs deze route.");
+            int shownClosures = 0;
+            for (LiveTrafficService.TrafficEvent e : currentRoute.trafficEvents) {
+                if (!e.closure || shownClosures >= 3) continue;
+                sb.append("\n• ").append(e.description);
+                shownClosures++;
+            }
+            sb.append("\n");
+        }
+
         if (critical == 0 && caution == 0) {
-            sb.append("✓ Geen kritieke maat-, gewicht- of bussluisbeperking gevonden in de online routescan.");
+            sb.append("✓ Geen kritieke maat-, gewicht- of bussluisbeperking gevonden in de OSM-routescan.");
         } else {
             sb.append("⚠ ").append(critical).append(" kritisch • ")
-                    .append(caution).append(" aandachtspunt");
+                    .append(caution).append(" voertuig-aandachtspunt");
             if (caution != 1) sb.append("en");
 
             int shown = 0;
@@ -570,17 +627,18 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         if (info > 0) {
             sb.append("\n• ").append(info)
-                    .append(" busbaan/bustoegang als toegestaan profielsignaal gevonden.");
+                    .append(" busbaan/bustoegang herkend als toegestaan profielsignaal.");
         }
         if (scanNote != null && !scanNote.isEmpty()) {
             sb.append("\n").append(scanNote);
         }
-        sb.append("\nControleer ter plaatse altijd de bebording.");
+        sb.append("\nBronnen: OpenStreetMap + actuele NDW-afsluitingen. Controleer ter plaatse altijd de bebording.");
         return sb.toString();
     }
 
     private int restrictionSummaryColor() {
         if (currentRoute == null) return MUTED;
+        if (currentRoute.liveClosureCount() > 0) return RED;
         if (currentRoute.criticalCount() > 0) return RED;
         if (currentRoute.cautionCount() > 0) return ORANGE;
         return GREEN;
@@ -594,6 +652,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         announcedApproachSteps.clear();
         announcedNearSteps.clear();
         announcedRestrictions.clear();
+        announcedTrafficEvents.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
         lastRerouteMs = System.currentTimeMillis();
 
@@ -701,23 +760,39 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     }
 
     private void updateRestrictionWarnings(double lat, double lon) {
-        if (currentRoute.restrictions == null) return;
+        if (currentRoute.restrictions != null) {
+            for (int i = 0; i < currentRoute.restrictions.size(); i++) {
+                if (announcedRestrictions.contains(i)) continue;
+                OnlineServices.Restriction r = currentRoute.restrictions.get(i);
+                if (r.informational) continue;
 
-        for (int i = 0; i < currentRoute.restrictions.size(); i++) {
-            if (announcedRestrictions.contains(i)) continue;
-            OnlineServices.Restriction r = currentRoute.restrictions.get(i);
-            if (r.informational) continue;
+                double d = OnlineServices.distanceMeters(lat, lon, r.lat, r.lon);
+                if (d < 420) {
+                    announcedRestrictions.add(i);
+                    if (r.critical) {
+                        navStatus.setText("⚠ KRITIEKE VOERTUIGWAARSCHUWING");
+                        speak("Let op. " + r.type + ". " + r.description
+                                + " Controleer de bebording.");
+                    } else {
+                        speak("Let op. Aandachtspunt voor " + r.type + ". "
+                                + r.description);
+                    }
+                }
+            }
+        }
 
-            double d = OnlineServices.distanceMeters(lat, lon, r.lat, r.lon);
-            if (d < 420) {
-                announcedRestrictions.add(i);
-                if (r.critical) {
-                    navStatus.setText("⚠ KRITIEKE VOERTUIGWAARSCHUWING");
-                    speak("Let op. " + r.type + ". " + r.description
-                            + " Controleer de bebording.");
-                } else {
-                    speak("Let op. Aandachtspunt voor " + r.type + ". "
-                            + r.description);
+        if (currentRoute.trafficEvents != null) {
+            for (int i = 0; i < currentRoute.trafficEvents.size(); i++) {
+                if (announcedTrafficEvents.contains(i)) continue;
+                LiveTrafficService.TrafficEvent e = currentRoute.trafficEvents.get(i);
+                if (!e.closure) continue;
+
+                double d = OnlineServices.distanceMeters(lat, lon, e.lat, e.lon);
+                if (d < 850) {
+                    announcedTrafficEvents.add(i);
+                    navStatus.setText("🚧 ACTUELE AFSLUITING OP ROUTE");
+                    speak("Let op. Actuele afsluiting gemeld door NDW. "
+                            + e.description + ". Controleer de route en bebording.");
                 }
             }
         }
@@ -729,10 +804,13 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         announcedApproachSteps.clear();
         announcedNearSteps.clear();
         announcedRestrictions.clear();
+        announcedTrafficEvents.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
         navStatus.setText("NAVIGATIE ACTIEF • route bijgewerkt");
 
-        if (currentRoute.criticalCount() > 0) {
+        if (currentRoute.liveClosureCount() > 0) {
+            navStatus.setText("🚧 ACTUELE AFSLUITING OP ROUTE");
+        } else if (currentRoute.criticalCount() > 0) {
             navStatus.setText("⚠ ROUTE HEEFT VOERTUIGWAARSCHUWING");
         }
 
@@ -793,6 +871,16 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             marker.setPosition(new GeoPoint(r.lat, r.lon));
             marker.setTitle(r.type);
             marker.setSnippet(r.description);
+            marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+            restrictionMarkers.add(marker);
+            map.getOverlays().add(marker);
+        }
+
+        for (LiveTrafficService.TrafficEvent e : currentRoute.trafficEvents) {
+            Marker marker = new Marker(map);
+            marker.setPosition(new GeoPoint(e.lat, e.lon));
+            marker.setTitle("🚧 " + e.type + " • " + e.source);
+            marker.setSnippet(e.description);
             marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
             restrictionMarkers.add(marker);
             map.getOverlays().add(marker);
