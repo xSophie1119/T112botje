@@ -182,16 +182,24 @@ public final class RoadDataService {
                 JSONObject loc = p.optJSONObject("location");
                 JSONObject road = loc == null ? null : loc.optJSONObject("road");
                 JSONObject county = loc == null ? null : loc.optJSONObject("county");
-                int bearing = loc == null ? -1 : loc.optInt("bearing", -1);
 
-                String parsedCounty = county == null
-                        ? countyCode : county.optString("code", countyCode);
+                int bearing = p.has("bearing")
+                        ? p.optInt("bearing", -1)
+                        : (loc == null ? -1 : loc.optInt("bearing", -1));
+
+                String roadName = p.optString("roadName", "");
+                if (roadName.isEmpty() && road != null) roadName = road.optString("name", "");
+
+                String parsedCounty = p.optString("countyCode", "");
+                if (parsedCounty.isEmpty() && county != null)
+                    parsedCounty = county.optString("code", "");
+                if (parsedCounty.isEmpty()) parsedCounty = countyCode;
 
                 parsed.add(new Sign(
                         feature.optString("id", p.optString("id", "")),
                         p.optString("rvvCode", ""),
                         p.optString("blackCode", ""),
-                        road == null ? "" : road.optString("name", ""),
+                        roadName,
                         parsedCounty,
                         coords.optDouble(1), coords.optDouble(0), bearing
                 ));
