@@ -32,18 +32,23 @@ public final class RoutePilotState {
     public static void saveRoute(Context c, OnlineServices.RouteResult route) {
         if (route == null || route.points == null) return;
         JSONArray arr = new JSONArray();
-        int stride = Math.max(1, route.points.size() / 350);
-        for (int i = 0; i < route.points.size(); i += stride) {
-            GeoPoint p = route.points.get(i);
-            JSONArray pt = new JSONArray();
-            pt.put(p.getLatitude()); pt.put(p.getLongitude());
-            arr.put(pt);
-        }
-        if (!route.points.isEmpty()) {
-            GeoPoint p = route.points.get(route.points.size() - 1);
-            JSONArray pt = new JSONArray(); pt.put(p.getLatitude()); pt.put(p.getLongitude());
-            arr.put(pt);
-        }
+        try {
+            int stride = Math.max(1, route.points.size() / 350);
+            for (int i = 0; i < route.points.size(); i += stride) {
+                GeoPoint p = route.points.get(i);
+                JSONArray pt = new JSONArray();
+                pt.put(p.getLatitude());
+                pt.put(p.getLongitude());
+                arr.put(pt);
+            }
+            if (!route.points.isEmpty()) {
+                GeoPoint p = route.points.get(route.points.size() - 1);
+                JSONArray pt = new JSONArray();
+                pt.put(p.getLatitude());
+                pt.put(p.getLongitude());
+                arr.put(pt);
+            }
+        } catch (Exception ignored) {}
         c.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit()
                 .putString("route_geometry",arr.toString()).apply();
     }
