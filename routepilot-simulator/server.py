@@ -23,7 +23,7 @@ HOST = os.environ.get("ROUTEPILOT_SIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ROUTEPILOT_SIM_PORT", "8765"))
 TOKEN = os.environ.get("ROUTEPILOT_PORTAL_TOKEN", "")
 ROUTER = os.environ.get("ROUTEPILOT_ROUTER_URL", "https://router.project-osrm.org").rstrip("/")
-USER_AGENT = "RoutePilot-Simulator/3.2 (+https://github.com/xSophie1119/T112botje)"
+USER_AGENT = "RoutePilot-Simulator/3.3.1 (+https://github.com/xSophie1119/T112botje)"
 
 # Public / neighborhood-level anchors only; no client data is baked into the simulator.
 ANCHORS = [
@@ -133,6 +133,145 @@ def haversine_m(a_lat, a_lon, b_lat, b_lon):
     return 2 * r * math.asin(min(1, math.sqrt(h)))
 
 
+SAFE_ENDPOINT_CLASSES = {
+    "service": 0.0,
+    "residential": 0.0,
+    "living_street": 0.0,
+    "unclassified": 8.0,
+    "tertiary": 20.0,
+    "secondary": 45.0,
+    "primary": 85.0,
+    "road": 25.0,
+}
+FORBIDDEN_ENDPOINT_CLASSES = {
+    "motorway", "motorway_link", "trunk", "trunk_link",
+    "construction", "proposed", "raceway", "steps", "path",
+    "footway", "cycleway", "bridleway", "track",
+}
+_endpoint_cache = {}
+_endpoint_cache_lock = threading.Lock()
+
+
+def _project_on_segment(lat, lon, a_lat, a_lon, b_lat, b_lon):
+    lat0 = math.radians((lat + a_lat + b_lat) / 3.0)
+    mx = 111320.0 * math.cos(lat0)
+    my = 110540.0
+    ax, ay = a_lon * mx, a_lat * my
+    bx, by = b_lon * mx, b_lat * my
+    px, py = lon * mx, lat * my
+    vx, vy = bx - ax, by - ay
+    denom = vx * vx + vy * vy
+    t = 0.0 if denom < 0.01 else ((px - ax) * vx + (py - ay) * vy) / denom
+    t = max(0.0, min(1.0, t))
+    qx, qy = ax + t * vx, ay + t * vy
+    q_lon, q_lat = qx / mx, qy / my
+    return q_lat, q_lon, haversine_m(lat, lon, q_lat, q_lon)
+
+
+def _overpass_safe_endpoint(lat, lon):
+    key = (round(lat, 4), round(lon, 4))
+    with _endpoint_cache_lock:
+        cached = _endpoint_cache.get(key)
+    if cached:
+        return cached
+
+    query = (
+        f'[out:json][timeout:9];'
+        f'way(around:420,{lat:.6f},{lon:.6f})["highway"];'
+        f'out geom tags;'
+    )
+    payload = urllib.parse.urlencode({"data": query}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://overpass-api.de/api/interpreter",
+        data=payload,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        root = json.loads(resp.read().decode("utf-8"))
+
+    best = None
+    for element in root.get("elements", []):
+        tags = element.get("tags") or {}
+        highway = str(tags.get("highway", "")).strip()
+        if not highway or highway in FORBIDDEN_ENDPOINT_CLASSES:
+            continue
+        if highway not in SAFE_ENDPOINT_CLASSES:
+            continue
+
+        access = str(tags.get("access", "")).lower()
+        motor_vehicle = str(tags.get("motor_vehicle", "")).lower()
+        if access in ("no", "private") or motor_vehicle in ("no", "private"):
+            continue
+
+        geometry = element.get("geometry") or []
+        if len(geometry) < 2:
+            continue
+
+        for i in range(1, len(geometry)):
+            a, b = geometry[i - 1], geometry[i]
+            q_lat, q_lon, dist = _project_on_segment(
+                lat, lon,
+                float(a["lat"]), float(a["lon"]),
+                float(b["lat"]), float(b["lon"]),
+            )
+            # Lokale wegen zijn sterk gewenst; hoofdwegen alleen als er echt
+            # geen betere WMO-achtige straat dichtbij ligt.
+            score = dist + SAFE_ENDPOINT_CLASSES[highway]
+            if tags.get("service") == "parking_aisle":
+                score -= 6.0
+            if tags.get("bus") == "yes" and tags.get("motor_vehicle") == "no":
+                score += 500.0
+
+            if best is None or score < best["score"]:
+                best = {
+                    "lat": q_lat,
+                    "lon": q_lon,
+                    "distance_m": dist,
+                    "score": score,
+                    "highway": highway,
+                    "road_name": str(tags.get("name", "") or tags.get("ref", "") or highway),
+                }
+
+    if best is None:
+        raise RuntimeError("Geen geschikte lokale trainingsweg binnen 420 meter gevonden.")
+
+    # Een trainingsbestemming hoort geen halve wijk van het anker te liggen.
+    if best["distance_m"] > 260.0:
+        raise RuntimeError(
+            f"Geen geschikte lokale trainingsweg dichtbij genoeg gevonden "
+            f"({best['distance_m']:.0f} m)."
+        )
+
+    with _endpoint_cache_lock:
+        _endpoint_cache[key] = best
+    return best
+
+
+def safe_training_endpoint(name, lat, lon):
+    try:
+        p = _overpass_safe_endpoint(lat, lon)
+        return (
+            f"{name} · {p['road_name']}",
+            float(p["lat"]),
+            float(p["lon"]),
+            p,
+        )
+    except Exception:
+        # Fail-safe: laat de simulator niet naar een willekeurige snelweg
+        # springen. De originele coördinaat mag alleen met een zeer kleine
+        # OSRM-snapradius worden gebruikt.
+        return (name, lat, lon, {
+            "lat": lat, "lon": lon, "distance_m": 0.0,
+            "highway": "unknown", "road_name": "",
+            "fallback": True,
+        })
+
+
 def min_distance_to_geometry(lat, lon, coords):
     if not coords:
         return 1e12
@@ -179,7 +318,7 @@ def route_score(route, corrections):
 
 
 def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
-    key_raw = f"{o_lat:.5f},{o_lon:.5f}>{d_lat:.5f},{d_lon:.5f}"
+    key_raw = f"safe-v2:{o_lat:.5f},{o_lon:.5f}>{d_lat:.5f},{d_lon:.5f}"
     cache_key = hashlib.sha256(key_raw.encode()).hexdigest()
     with db_lock, db() as con:
         row = con.execute("SELECT response_json,created_at FROM route_cache WHERE cache_key=?", (cache_key,)).fetchone()
@@ -188,7 +327,8 @@ def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
 
     url = (
         f"{ROUTER}/route/v1/driving/{o_lon:.6f},{o_lat:.6f};{d_lon:.6f},{d_lat:.6f}"
-        "?overview=full&geometries=geojson&steps=false&alternatives=3&continue_straight=true"
+        "?overview=full&geometries=geojson&steps=false&alternatives=3"
+        "&continue_straight=true&radiuses=38;38"
     )
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=12) as resp:
@@ -208,7 +348,26 @@ def simulate_pair(batch_id, origin, destination, corrections):
     d_name, d_lat, d_lon = destination
     created = now_ms()
     try:
+        o_name, o_lat, o_lon, o_meta = safe_training_endpoint(o_name, o_lat, o_lon)
+        d_name, d_lat, d_lon, d_meta = safe_training_endpoint(d_name, d_lat, d_lon)
         data = cached_osrm_route(o_lat, o_lon, d_lat, d_lon)
+
+        # OSRM rapporteert waar hij de waypoints werkelijk heeft gesnapt.
+        # Als dat ondanks onze lokale wegselectie nog te ver weg is, verwerpen.
+        waypoints = data.get("waypoints") or []
+        if len(waypoints) >= 2:
+            for idx, meta in ((0, o_meta), (1, d_meta)):
+                wp = waypoints[idx]
+                snap_distance = float(wp.get("distance", 0) or 0)
+                if snap_distance > 45.0:
+                    raise RuntimeError(
+                        f"Trainingspunt snapte {snap_distance:.0f} m weg van de gekozen lokale weg."
+                    )
+
+        if o_meta.get("highway") in FORBIDDEN_ENDPOINT_CLASSES:
+            raise RuntimeError("Startpunt ligt op een verboden wegklasse.")
+        if d_meta.get("highway") in FORBIDDEN_ENDPOINT_CLASSES:
+            raise RuntimeError("Eindpunt ligt op een verboden wegklasse.")
         candidates = []
         for route in data.get("routes", [])[:3]:
             score, hits = route_score(route, corrections)
@@ -270,7 +429,7 @@ def simulate_batch(count, seed):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RoutePilotSimulator/3.3"
+    server_version = "RoutePilotSimulator/3.3.1"
 
     def log_message(self, fmt, *args):
         print("[sim]", fmt % args)
@@ -304,7 +463,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "unauthorized"}, 401)
 
         if path == "/api/health":
-            return self.send_json({"ok": True, "version": "3.3", "router": ROUTER, "db": str(DB_PATH)})
+            return self.send_json({"ok": True, "version": "3.3.1", "router": ROUTER, "db": str(DB_PATH)})
 
         if path == "/api/corrections" or path == "/api/corrections/export":
             return self.send_json({"version": 1, "generated_at": now_ms(), "corrections": active_corrections()})
@@ -501,7 +660,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RoutePilot Simulator 3.3 → http://{HOST}:{PORT}")
+    print(f"RoutePilot Simulator 3.3.1 → http://{HOST}:{PORT}")
     print(f"Database: {DB_PATH}")
     if not TOKEN and HOST not in ("127.0.0.1", "localhost", "::1"):
         print("WAARSCHUWING: geen ROUTEPILOT_PORTAL_TOKEN ingesteld op een niet-lokale bind.")
