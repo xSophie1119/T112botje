@@ -24,37 +24,85 @@ HOST = os.environ.get("ROUTEPILOT_SIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ROUTEPILOT_SIM_PORT", "8765"))
 TOKEN = os.environ.get("ROUTEPILOT_PORTAL_TOKEN", "")
 ROUTER = os.environ.get("ROUTEPILOT_ROUTER_URL", "https://router.project-osrm.org").rstrip("/")
-USER_AGENT = "RoutePilot-Simulator/3.4.0 (+https://github.com/xSophie1119/T112botje)"
+USER_AGENT = "RoutePilot-Simulator/3.5.0 (+https://github.com/xSophie1119/T112botje)"
 
-# Public area seeds used only to discover concrete public addresses/POIs.
-# The seed itself is NEVER presented as the final training destination.
-ANCHORS = [
-    ("Centrum", 51.5555, 5.0913),
-    ("Spoorzone", 51.5606, 5.0837),
-    ("Tilburg-West", 51.5570, 5.0420),
-    ("Universiteit", 51.5640, 5.0410),
-    ("Reeshof", 51.5750, 5.0030),
-    ("Dalem", 51.5870, 4.9880),
-    ("Witbrant", 51.5585, 5.0050),
-    ("Noord", 51.5865, 5.0710),
-    ("Wagnerplein", 51.5895, 5.0690),
-    ("Quirijnstok", 51.5880, 5.0920),
-    ("Stokhasselt", 51.5805, 5.1010),
-    ("Oud-Noord", 51.5710, 5.0880),
-    ("Korvel", 51.5500, 5.0700),
-    ("Broekhoven", 51.5410, 5.0880),
-    ("Stappegoor", 51.5350, 5.0830),
-    ("Piushaven", 51.5510, 5.1050),
-    ("Jeruzalem", 51.5530, 5.1210),
-    ("Berkel-Enschot", 51.5860, 5.1420),
-    ("Udenhout", 51.6090, 5.1430),
-    ("TweeSteden", 51.5780, 5.0540),
-    ("Elisabeth", 51.5415, 5.0835),
-    ("Goirke", 51.5720, 5.0730),
-    ("Zorgvlied", 51.5480, 5.0520),
-    ("Armhoef", 51.5590, 5.1170),
-    ("Groeseind", 51.5780, 5.0860),
+# Regiovervoer Midden-Brabant: 8 gemeenten vormen het binnengebied.
+INNER_MUNICIPALITIES={
+    "Tilburg","Waalwijk","Dongen","Gilze en Rijen",
+    "Oisterwijk","Hilvarenbeek","Goirle","Loon op Zand",
+}
+
+# Veel meer spreiding dan de oude Tilburg-only wijkankers.
+# tuple: label, lat, lon, gemeente, zone
+AREA_SEEDS=[
+    # Binnengebied — Tilburg
+    ("Tilburg Centrum",51.5555,5.0913,"Tilburg","inside"),
+    ("Tilburg Reeshof",51.5750,5.0030,"Tilburg","inside"),
+    ("Tilburg Noord",51.5865,5.0710,"Tilburg","inside"),
+    ("Tilburg Zuid",51.5350,5.0830,"Tilburg","inside"),
+    ("Tilburg Oost",51.5590,5.1170,"Tilburg","inside"),
+    ("Berkel-Enschot",51.5860,5.1420,"Tilburg","inside"),
+    ("Udenhout",51.6090,5.1430,"Tilburg","inside"),
+
+    # Overige binnengebied-gemeenten
+    ("Waalwijk",51.6820,5.0700,"Waalwijk","inside"),
+    ("Sprang-Capelle",51.6720,5.0490,"Waalwijk","inside"),
+    ("Waspik",51.6860,4.9440,"Waalwijk","inside"),
+    ("Dongen",51.6260,4.9380,"Dongen","inside"),
+    ("Rijen",51.5900,4.9190,"Gilze en Rijen","inside"),
+    ("Gilze",51.5440,4.9400,"Gilze en Rijen","inside"),
+    ("Oisterwijk",51.5790,5.1950,"Oisterwijk","inside"),
+    ("Moergestel",51.5440,5.1840,"Oisterwijk","inside"),
+    ("Haaren",51.6020,5.2220,"Oisterwijk","inside"),
+    ("Hilvarenbeek",51.4860,5.1370,"Hilvarenbeek","inside"),
+    ("Diessen",51.4750,5.1760,"Hilvarenbeek","inside"),
+    ("Goirle",51.5200,5.0670,"Goirle","inside"),
+    ("Riel",51.5230,5.0220,"Goirle","inside"),
+    ("Kaatsheuvel",51.6600,5.0300,"Loon op Zand","inside"),
+    ("Loon op Zand",51.6270,5.0750,"Loon op Zand","inside"),
+    ("De Moer",51.6270,5.0130,"Loon op Zand","inside"),
+
+    # Buitenring / omliggende gemeenten. Een adres hier is pas geldig als
+    # de uiteindelijke rit <=25 km is en de andere zijde in het binnengebied ligt.
+    ("Breda Noord",51.6020,4.7750,"Breda","outside"),
+    ("Breda Oost",51.5840,4.8220,"Breda","outside"),
+    ("Oosterhout",51.6450,4.8600,"Oosterhout","outside"),
+    ("Raamsdonksveer",51.6960,4.8730,"Geertruidenberg","outside"),
+    ("Drunen",51.6870,5.1340,"Heusden","outside"),
+    ("Vlijmen",51.6960,5.2110,"Heusden","outside"),
+    ("Vught",51.6540,5.2870,"Vught","outside"),
+    ("Boxtel",51.5900,5.3290,"Boxtel","outside"),
+    ("Oirschot",51.5050,5.3130,"Oirschot","outside"),
+    ("Alphen",51.4810,4.9580,"Alphen-Chaam","outside"),
+    ("Chaam",51.5050,4.8610,"Alphen-Chaam","outside"),
+    ("Baarle-Nassau",51.4430,4.9300,"Baarle-Nassau","outside"),
 ]
+
+# Alias voor bestaande smoke tests.
+ANCHORS=[(name,lat,lon) for name,lat,lon,_municipality,_zone in AREA_SEEDS]
+
+HOSPITAL_SPECS=[
+    # naam, adresquery, gemeente, zone
+    ("ETZ Elisabeth","Hilvarenbeekseweg 60 5022 GC Tilburg","Tilburg","inside"),
+    ("ETZ TweeSteden","Dr. Deelenlaan 5 5042 AD Tilburg","Tilburg","inside"),
+    ("ETZ Waalwijk","Kasteellaan 2 5141 BM Waalwijk","Waalwijk","inside"),
+    ("Amphia Breda","Molengracht 21 4818 CK Breda","Breda","outside"),
+    ("Amphia Oosterhout","Pasteurlaan 9 4901 DH Oosterhout","Oosterhout","outside"),
+    ("Jeroen Bosch Ziekenhuis","Henri Dunantstraat 1 5223 GZ 's-Hertogenbosch","'s-Hertogenbosch","outside"),
+]
+
+# Steden/plaatsen waarmee OSM-zorginstellingen aan de 8 regiogemeenten
+# gekoppeld kunnen worden.
+PLACE_TO_MUNICIPALITY={
+    "tilburg":"Tilburg","berkel-enschot":"Tilburg","udenhout":"Tilburg",
+    "waalwijk":"Waalwijk","sprang-capelle":"Waalwijk","waspik":"Waalwijk",
+    "dongen":"Dongen","rijen":"Gilze en Rijen","gilze":"Gilze en Rijen",
+    "oisterwijk":"Oisterwijk","moergestel":"Oisterwijk","haaren":"Oisterwijk",
+    "hilvarenbeek":"Hilvarenbeek","diessen":"Hilvarenbeek",
+    "goirle":"Goirle","riel":"Goirle",
+    "kaatsheuvel":"Loon op Zand","loon op zand":"Loon op Zand","de moer":"Loon op Zand",
+}
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS corrections (
@@ -80,6 +128,9 @@ CREATE TABLE IF NOT EXISTS training_locations (
     lon REAL NOT NULL,
     source TEXT NOT NULL DEFAULT 'PDOK',
     area_name TEXT NOT NULL DEFAULT '',
+    municipality TEXT NOT NULL DEFAULT '',
+    zone TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'general',
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS batch_runs (
@@ -129,6 +180,12 @@ CREATE TABLE IF NOT EXISTS scenarios (
     origin_target_to_stop_m REAL NOT NULL DEFAULT 0,
     destination_target_to_stop_m REAL NOT NULL DEFAULT 0,
     generator_version TEXT NOT NULL DEFAULT 'legacy',
+    trip_category TEXT NOT NULL DEFAULT 'general',
+    origin_zone TEXT NOT NULL DEFAULT '',
+    destination_zone TEXT NOT NULL DEFAULT '',
+    origin_municipality TEXT NOT NULL DEFAULT '',
+    destination_municipality TEXT NOT NULL DEFAULT '',
+    ring_rule TEXT NOT NULL DEFAULT '',
     distance_m REAL NOT NULL DEFAULT 0,
     duration_s REAL NOT NULL DEFAULT 0,
     score REAL NOT NULL DEFAULT 0,
