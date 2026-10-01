@@ -1663,7 +1663,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         EditText height = numberField("Hoogte (m)", vehicle.heightM);
         EditText width = numberField("Breedte (m)", vehicle.widthM);
         EditText weight = numberField("Max. massa (ton)", vehicle.maxWeightT);
+        EditText liftClearance = numberField("Vrije ruimte achterlift (m)", vehicle.rearLiftClearanceM);
         box.addView(length); box.addView(height); box.addView(width); box.addView(weight);
+        box.addView(liftClearance);
 
         CheckBox rearLift = new CheckBox(this);
         rearLift.setText("Achterlift");
@@ -1695,11 +1697,14 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                         double h = parseNumber(height.getText().toString());
                         double w = parseNumber(width.getText().toString());
                         double m = parseNumber(weight.getText().toString());
-                        if (l < 2 || h < 1.5 || w < 1.5 || m < 0.5)
+                        double liftM = parseNumber(liftClearance.getText().toString());
+                        if (l < 2 || h < 1.5 || w < 1.5 || m < 0.5
+                                || liftM < 0.5 || liftM > 5.0)
                             throw new IllegalArgumentException();
 
                         vehicle.lengthM = l; vehicle.heightM = h; vehicle.widthM = w;
                         vehicle.maxWeightT = m; vehicle.rearLift = rearLift.isChecked();
+                        vehicle.rearLiftClearanceM = liftM;
                         vehicle.busLaneExemption = busLane.isChecked();
                         vehicle.save(this);
                         refreshVehicleSummary();
@@ -1723,8 +1728,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private void refreshVehicleSummary() {
         vehicleSummary.setText(String.format(NL,
-                "🚐 %.2f×%.2f×%.2f m • %.2f t%s • 🚪 rechts-ingang",
+                "🚐 %.2f×%.2f×%.2f m • %.2f t • lift %.1f m%s • 🚪 rechts-ingang",
                 vehicle.lengthM, vehicle.widthM, vehicle.heightM, vehicle.maxWeightT,
+                vehicle.rearLiftClearanceM,
                 vehicle.busLaneExemption ? " • Tilburg-ontheffing" : ""));
     }
 
