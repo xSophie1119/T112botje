@@ -110,6 +110,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private final Set<Integer> announcedRestrictions = new HashSet<>();
     private final Set<Integer> announcedTrafficEvents = new HashSet<>();
     private final Set<String> announcedRoadSigns = new HashSet<>();
+    private final Set<Integer> announcedBridgeEvents = new HashSet<>();
+    private final Set<Integer> announcedTempSpeeds = new HashSet<>();
 
     private EditText destinationInput;
     private TextView gpsStatus;
@@ -765,6 +767,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (signs > 0) b.append("\n🛑 ").append(signs).append(" officiële NDW-borden langs route");
         if (currentRoute.officialSpeeds != null && !currentRoute.officialSpeeds.isEmpty())
             b.append("\n🚦 WKD-wegvaksnelheden geladen (dag/nachtlaag)");
+        if (currentRoute.temporarySpeeds != null && !currentRoute.temporarySpeeds.isEmpty())
+            b.append("\n⏱ ").append(currentRoute.temporarySpeeds.size())
+                    .append(" tijdelijke NDW-snelheidsmaatregel(en)");
+        if (currentRoute.bridgeEvents != null && !currentRoute.bridgeEvents.isEmpty())
+            b.append("\n🌉 ").append(currentRoute.bridgeEvents.size())
+                    .append(" brugopening(en) conflicteren met verwachte passage");
 
         int busInfo = 0;
         for (OnlineServices.Restriction r : currentRoute.restrictions)
@@ -808,6 +816,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         announcedRestrictions.clear();
         announcedTrafficEvents.clear();
         announcedRoadSigns.clear();
+        announcedBridgeEvents.clear();
+        announcedTempSpeeds.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
         lastRerouteMs = System.currentTimeMillis();
         lastTrafficRefreshMs = System.currentTimeMillis();
@@ -887,9 +897,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                     currentRoute.points.get(routeIndex), currentRoute.officialSpeeds);
         }
         Integer signSpeed = RoadDataService.speedLimitAt(routeIndex, currentRoute.roadSigns);
-        currentSpeedLimit = wkdSpeed != null ? wkdSpeed : (signSpeed == null ? -1 : signSpeed);
+        Integer tempSpeed = TemporarySpeedService.speedAt(routeIndex, currentRoute.temporarySpeeds);
+        currentSpeedLimit = tempSpeed != null ? tempSpeed
+                : wkdSpeed != null ? wkdSpeed
+                : (signSpeed == null ? -1 : signSpeed);
         if (currentSpeedLimit <= 0) navSpeed.setText("MAX —");
-        else navSpeed.setText("MAX " + currentSpeedLimit);
+        else navSpeed.setText((tempSpeed != null ? "TIJDELIJK " : "MAX ") + currentSpeedLimit);
 
         navScore.setText("ROUTE " + currentAnalysis.score + "/100");
         navScore.setTextColor(currentAnalysis.score >= 82 ? GREEN
@@ -1060,11 +1073,54 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             }
         }
 
+        if (currentRoute.bridgeEvents != null) {
+            for (int i = 0; i < currentRoute.bridgeEvents.size(); i++) {
+                if (announcedBridgeEvents.contains(i)) continue;
+                BridgeOpeningService.Event e = currentRoute.bridgeEvents.get(i);
+                int target = e.routeIndex >= 0 ? e.routeIndex
+                        : OnlineServices.closestRoutePointIndex(e.lat, e.lon, currentRoute.points);
+                double ahead = LookAheadEngine.distanceAlong(currentRoute.points, routeIndex, target);
+                if (ahead < 0 || ahead > 1800.0) continue;
+
+                WarningCandidate w = new WarningCandidate();
+                w.source = 4; w.index = i;
+                w.priority = 105;
+                w.aheadMeters = ahead;
+                w.warning = "Brugopening: " + e.description;
+                w.spoken = "Let op. Verwachte brugopening over "
+                        + spokenDistance(ahead) + ". " + e.description;
+                w.status = "🌉 BRUGOPENING VOORUIT";
+                best = betterWarning(best, w);
+            }
+        }
+
+        if (currentRoute.temporarySpeeds != null) {
+            for (int i = 0; i < currentRoute.temporarySpeeds.size(); i++) {
+                if (announcedTempSpeeds.contains(i)) continue;
+                TemporarySpeedService.Limit l = currentRoute.temporarySpeeds.get(i);
+                double ahead = LookAheadEngine.distanceAlong(
+                        currentRoute.points, routeIndex, l.routeIndex);
+                if (ahead < 0 || ahead > 500.0) continue;
+
+                WarningCandidate w = new WarningCandidate();
+                w.source = 5; w.index = i;
+                w.priority = 50;
+                w.aheadMeters = ahead;
+                w.warning = "Tijdelijke maximumsnelheid " + l.kmh + " km/u";
+                w.spoken = "Over " + spokenDistance(ahead)
+                        + " geldt tijdelijk maximaal " + l.kmh + " kilometer per uur.";
+                w.status = "⏱ TIJDELIJKE SNELHEID";
+                best = betterWarning(best, w);
+            }
+        }
+
         if (best == null) return;
 
         if (best.source == 1) announcedRestrictions.add(best.index);
         else if (best.source == 2) announcedTrafficEvents.add(best.index);
         else if (best.source == 3) announcedRoadSigns.add(best.key);
+        else if (best.source == 4) announcedBridgeEvents.add(best.index);
+        else if (best.source == 5) announcedTempSpeeds.add(best.index);
 
         currentWarning = best.warning;
         RoutePilotStore.markWarning(this);
@@ -1153,6 +1209,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         announcedRestrictions.clear();
         announcedTrafficEvents.clear();
         announcedRoadSigns.clear();
+        announcedBridgeEvents.clear();
+        announcedTempSpeeds.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
         navStatus.setText("NAVIGATIE ACTIEF • route bijgewerkt");
 
