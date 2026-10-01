@@ -25,6 +25,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -32,15 +33,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONArray;
-import org.osmdroid.config.Configuration;
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
-import org.osmdroid.util.BoundingBox;
 import org.osmdroid.util.GeoPoint;
-import org.osmdroid.views.MapView;
-import org.osmdroid.views.overlay.CopyrightOverlay;
-import org.osmdroid.views.overlay.Marker;
-import org.osmdroid.views.overlay.Polyline;
-import org.osmdroid.views.overlay.TilesOverlay;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -67,12 +60,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private final int ORANGE = Color.rgb(251, 146, 60);
     private final int RED = Color.rgb(248, 113, 113);
 
-    private MapView map;
-    private Marker locationMarker;
-    private Marker destinationMarker;
-    private Polyline routeLine;
-    private Polyline replayLine;
-    private final List<Marker> routeMarkers = new ArrayList<>();
+    private RouteMapView map;
+    private TextView mapStatusPill;
 
     private LocationManager locationManager;
     private Location currentLocation;
@@ -147,10 +136,6 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        Configuration.getInstance().setUserAgentValue(OnlineServices.USER_AGENT);
-        Configuration.getInstance().setTileDownloadThreads((short) 2);
-        Configuration.getInstance().setTileFileSystemThreads((short) 2);
-
         vehicle = VehicleProfile.load(this);
         tts = new TextToSpeech(this, this);
         locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
@@ -159,19 +144,24 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);
 
-        map = new MapView(this);
-        map.setTileSource(TileSourceFactory.MAPNIK);
-        map.setMultiTouchControls(true);
-        map.setTilesScaledToDpi(true);
-        map.setMinZoomLevel(4.0);
-        map.setMaxZoomLevel(19.0);
-        map.getController().setZoom(13.5);
-        map.getController().setCenter(new GeoPoint(51.5555, 5.0913));
-        map.getOverlays().add(new CopyrightOverlay(this));
+        FrameLayout mapFrame = new FrameLayout(this);
+        map = new RouteMapView(this);
+        mapFrame.addView(map, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        mapStatusPill = text("● ROUTEPILOT MAP", 10, TEXT, Typeface.BOLD);
+        mapStatusPill.setPadding(dp(12), dp(8), dp(12), dp(8));
+        mapStatusPill.setBackground(rounded(Color.argb(220, 10, 18, 30), 16));
+        FrameLayout.LayoutParams pillLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(38));
+        pillLp.gravity = Gravity.TOP | Gravity.START;
+        pillLp.leftMargin = dp(12);
+        pillLp.topMargin = dp(12);
+        mapFrame.addView(mapStatusPill, pillLp);
 
         LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.54f);
-        root.addView(map, mapLp);
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.60f);
+        root.addView(mapFrame, mapLp);
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout panel = new LinearLayout(this);
@@ -392,7 +382,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         row.setPadding(0, dp(9), 0, 0);
 
         Button follow = darkButton("◎ Volgen");
-        follow.setOnClickListener(v -> { followMode = true; centerOnMe(); });
+        follow.setOnClickListener(v -> {
+            followMode = true;
+            map.setFollowMode(true);
+            centerOnMe();
+        });
         row.addView(follow, new LinearLayout.LayoutParams(0, dp(46), 1f));
 
         Button report = darkButton("⚠ Meld");
@@ -629,14 +623,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         currentLocation = location;
         RoutePilotState.updatePosition(this, location.getLatitude(), location.getLongitude());
 
-        GeoPoint point = new GeoPoint(location.getLatitude(), location.getLongitude());
-        if (locationMarker == null) {
-            locationMarker = new Marker(map);
-            locationMarker.setTitle("Mijn locatie");
-            locationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-            map.getOverlays().add(locationMarker);
-        }
-        locationMarker.setPosition(point);
+        map.setUserLocation(location, navigating);
 
         int accuracy = Math.round(location.getAccuracy());
         double kmh = location.hasSpeed() ? Math.max(0, location.getSpeed() * 3.6) : 0;
@@ -647,8 +634,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         if (!centeredOnce) {
             centeredOnce = true;
-            map.getController().setZoom(16.0);
-            map.getController().animateTo(point);
+            map.centerOn(location.getLatitude(), location.getLongitude(), false,
+                    location.hasBearing() ? location.getBearing() : 0f);
         }
 
         if (navigating) {
@@ -656,7 +643,6 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                     location.hasSpeed() ? location.getSpeed() : 0f);
             updateNavigationProgress(location);
         }
-        map.invalidate();
     }
 
     private void searchAndRoute() {
@@ -841,7 +827,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
         else startService(service);
 
-        map.getController().setZoom(17.0);
+        map.setFollowMode(true);
         centerOnMe();
         WmoSessionManager.Snapshot activeWmo = WmoSessionManager.get(this);
         speak(activeWmo.phase == WmoSessionManager.Phase.TO_DROPOFF
@@ -970,8 +956,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         }
 
         if (followMode) {
-            map.getController().animateTo(new GeoPoint(lat, lon));
-            if (map.getZoomLevelDouble() < 16.0) map.getController().setZoom(17.0);
+            map.setFollowMode(true);
+            map.setUserLocation(location, true);
         }
     }
 
@@ -1314,6 +1300,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private void stopNavigation(boolean keepRoute) {
         navigating = false;
         followMode = false;
+        map.setFollowMode(false);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         RoutePilotState.update(this, false, "", "", 0, 0, 0,
@@ -1505,21 +1492,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             return;
         }
 
-        if (replayLine != null) map.getOverlays().remove(replayLine);
-        replayLine = new Polyline(map);
-        replayLine.setPoints(actual);
-        replayLine.getOutlinePaint().setColor(ORANGE);
-        replayLine.getOutlinePaint().setStrokeWidth(dp(7));
-        map.getOverlays().add(replayLine);
-
-        if (routeLine != null) map.getOverlays().remove(routeLine);
-        if (planned.size() >= 2) {
-            routeLine = new Polyline(map);
-            routeLine.setPoints(planned);
-            routeLine.getOutlinePaint().setColor(BLUE);
-            routeLine.getOutlinePaint().setStrokeWidth(dp(5));
-            map.getOverlays().add(routeLine);
-        }
+        map.showReplay(planned, actual);
 
         List<GeoPoint> bounds = new ArrayList<>(actual);
         bounds.addAll(planned);
@@ -1548,70 +1521,17 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     }
 
     private void drawCurrentRoute() {
-        if (routeLine != null) map.getOverlays().remove(routeLine);
-        for (Marker m : routeMarkers) map.getOverlays().remove(m);
-        routeMarkers.clear();
-
-        routeLine = new Polyline(map);
-        routeLine.setPoints(currentRoute.points);
-        routeLine.getOutlinePaint().setColor(BLUE);
-        routeLine.getOutlinePaint().setStrokeWidth(dp(7));
-        map.getOverlays().add(routeLine);
-
-        for (OnlineServices.Restriction r : currentRoute.restrictions) {
-            Marker marker = marker(r.lat, r.lon, r.type, r.description);
-            routeMarkers.add(marker);
-            map.getOverlays().add(marker);
-        }
-        for (LiveTrafficService.TrafficEvent e : currentRoute.trafficEvents) {
-            Marker marker = marker(e.lat, e.lon, "🚧 " + e.type + " • " + e.source, e.description);
-            routeMarkers.add(marker);
-            map.getOverlays().add(marker);
-        }
-        for (RoadDataService.Sign s : currentRoute.roadSigns) {
-            if (!s.isSpeed() && !RoadDataService.isRestriction(s)) continue;
-            Marker marker = marker(s.lat, s.lon, "🛑 " + s.rvvCode, s.description());
-            routeMarkers.add(marker);
-            map.getOverlays().add(marker);
-        }
-        map.invalidate();
-    }
-
-    private Marker marker(double lat, double lon, String title, String snippet) {
-        Marker m = new Marker(map);
-        m.setPosition(new GeoPoint(lat, lon));
-        m.setTitle(title);
-        m.setSnippet(snippet);
-        m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-        return m;
+        if (currentRoute == null) return;
+        map.setRoute(currentRoute);
     }
 
     private void showDestinationMarker() {
         if (currentDestination == null) return;
-        if (destinationMarker == null) {
-            destinationMarker = new Marker(map);
-            destinationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-            map.getOverlays().add(destinationMarker);
-        }
-        destinationMarker.setPosition(new GeoPoint(currentDestination.lat, currentDestination.lon));
-        destinationMarker.setTitle(shortLabel(currentDestination.label));
-        map.invalidate();
+        map.setDestination(currentDestination);
     }
 
     private void fitRoute(List<GeoPoint> points) {
-        if (points == null || points.isEmpty()) return;
-        double north = -90, south = 90, east = -180, west = 180;
-        for (GeoPoint p : points) {
-            north = Math.max(north, p.getLatitude());
-            south = Math.min(south, p.getLatitude());
-            east = Math.max(east, p.getLongitude());
-            west = Math.min(west, p.getLongitude());
-        }
-        try {
-            map.zoomToBoundingBox(new BoundingBox(north, east, south, west), true, dp(55));
-        } catch (Exception ignored) {
-            map.getController().animateTo(points.get(points.size() / 2));
-        }
+        map.fitPoints(points, dp(56));
     }
 
     private void refreshSavedPlaces() {
@@ -1759,10 +1679,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         WindowManager.LayoutParams lp = getWindow().getAttributes();
         lp.screenBrightness = night ? 0.45f : -1f;
         getWindow().setAttributes(lp);
-        try {
-            map.getOverlayManager().getTilesOverlay().setColorFilter(
-                    night ? TilesOverlay.INVERT_COLORS : null);
-        } catch (Exception ignored) {}
+        map.setNightMode(night);
     }
 
     private void handleNavigationIntent(Intent intent) {
@@ -1778,9 +1695,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             Toast.makeText(this, "Nog geen GPS-positie.", Toast.LENGTH_SHORT).show();
             return;
         }
-        map.getController().setZoom(navigating ? 17.0 : 16.5);
-        map.getController().animateTo(new GeoPoint(
-                currentLocation.getLatitude(), currentLocation.getLongitude()));
+        followMode = true;
+        map.setFollowMode(true);
+        map.centerOn(currentLocation.getLatitude(), currentLocation.getLongitude(),
+                navigating, currentLocation.hasBearing() ? currentLocation.getBearing() : 0f);
     }
 
     private void setRouteLoading(boolean loading) {
@@ -1900,6 +1818,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         return Math.round(dp * getResources().getDisplayMetrics().density);
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        if (map != null) map.onStart();
+    }
+
     @Override protected void onResume() {
         super.onResume();
         RoutePilotState.setActivityForeground(this, true);
@@ -1914,13 +1837,23 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         super.onPause();
     }
 
+    @Override protected void onStop() {
+        if (map != null) map.onStop();
+        super.onStop();
+    }
+
+    @Override public void onLowMemory() {
+        super.onLowMemory();
+        if (map != null) map.onLowMemory();
+    }
+
     @Override protected void onDestroy() {
         RoutePilotState.setActivityForeground(this, false);
         uiHandler.removeCallbacks(waitTicker);
         try { if (locationManager != null) locationManager.removeUpdates(this); }
         catch (Exception ignored) {}
         if (tts != null) { tts.stop(); tts.shutdown(); }
-        if (map != null) map.onDetach();
+        if (map != null) map.onDestroy();
         super.onDestroy();
     }
 }
