@@ -3,9 +3,10 @@ name: Build RoutePilot APK
 on:
   push:
     branches:
-      - routepilot-v3.1-visual-speed
+      - routepilot-v3.2-simulator
     paths:
       - 'routepilot/**'
+      - 'routepilot-simulator/**'
       - '.github/workflows/routepilot-apk.yml'
   pull_request:
     branches:
@@ -37,15 +38,46 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Test + build V3.1.0 debug APK
+      - name: Test + build V3.2.0 debug APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk RoutePilot-V3.1.0-debug.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk RoutePilot-V3.2.0-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RoutePilot-V3.1.0-debug-apk
-          path: routepilot/RoutePilot-V3.1.0-debug.apk
+          name: RoutePilot-V3.2.0-debug-apk
+          path: routepilot/RoutePilot-V3.2.0-debug.apk
           if-no-files-found: error
+
+
+  simulator-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate simulator
+        run: |
+          python -m py_compile routepilot-simulator/server.py
+          test -f routepilot-simulator/static/index.html
+          test -f routepilot-simulator/static/core.js
+          test -f routepilot-simulator/static/app.js
+          test -f routepilot-simulator/static/style.css
+          python - <<'PY'
+          import importlib.util, pathlib, tempfile, os
+          p = pathlib.Path('routepilot-simulator/server.py')
+          os.environ['ROUTEPILOT_SIM_DB'] = str(pathlib.Path(tempfile.gettempdir()) / 'routepilot-sim-ci.sqlite3')
+          spec = importlib.util.spec_from_file_location('rp_sim', p)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          assert len(mod.ANCHORS) >= 20
+          assert mod.route_score({'distance': 1000, 'duration': 100, 'geometry': {'coordinates': [[5.09,51.55],[5.10,51.56]]}}, [])[0] > 0
+          print('simulator smoke test ok')
+          PY
