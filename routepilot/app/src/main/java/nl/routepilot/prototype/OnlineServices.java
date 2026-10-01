@@ -106,6 +106,7 @@ public final class OnlineServices {
         public List<Restriction> restrictions = new ArrayList<>();
         public List<LiveTrafficService.TrafficEvent> trafficEvents = new ArrayList<>();
         public List<RoadDataService.Sign> roadSigns = new ArrayList<>();
+        public List<OfficialSpeedService.SpeedPoint> officialSpeeds = new ArrayList<>();
         public String selectionNote = "";
 
         public RouteResult(List<GeoPoint> points, double distanceMeters,
