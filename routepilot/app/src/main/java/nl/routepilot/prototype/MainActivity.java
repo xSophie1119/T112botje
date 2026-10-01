@@ -183,7 +183,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         buildWmoPanel(panel);
 
         TextView disclaimer = text(
-                "RoutePilot V3 debug • OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
+                "RoutePilot V3.1 debug • MapLibre/OpenFreeMap + OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
                 10, MUTED, Typeface.NORMAL);
         disclaimer.setGravity(Gravity.CENTER);
         disclaimer.setPadding(0, dp(12), 0, 0);
