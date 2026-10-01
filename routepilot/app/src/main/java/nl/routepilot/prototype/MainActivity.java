@@ -831,6 +831,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         RoutePilotStore.beginTrip(this, currentDestination.label, currentRoute.distanceMeters);
         RoutePilotStore.savePlannedRoute(this, currentRoute.points);
         RoutePilotState.saveRoute(this, currentRoute);
+        RoutePilotState.savePlan(this, currentRoute, currentDestination);
         RoutePilotState.update(this, true, "Navigatie gestart", "", 0,
                 currentRoute.distanceMeters,
                 System.currentTimeMillis() + (long)(currentRoute.durationSeconds * 1000),
@@ -1202,6 +1203,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         drawCurrentRoute();
         showDestinationMarker();
         RoutePilotState.saveRoute(this, currentRoute);
+        RoutePilotState.savePlan(this, currentRoute, currentDestination);
         RoutePilotStore.savePlannedRoute(this, currentRoute.points);
 
         announcedApproachSteps.clear();
