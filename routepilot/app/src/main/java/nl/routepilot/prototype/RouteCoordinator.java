@@ -37,6 +37,16 @@ public final class RouteCoordinator {
 
         Prepared selected=select(prepared);
 
+        if(hardScore(selected)>0){
+            Prepared detoured=tryAdaptiveDetours(context,start,destination,vehicle,selected);
+            if(detoured!=null && hardScore(detoured)<hardScore(selected)){
+                detoured.route.selectionNote=append(detoured.route.selectionNote,
+                        "Adaptive voertuigomleiding gekozen omdat de standaardroute een harde beperking of afsluiting raakte.");
+                prepared.add(detoured);
+                selected=select(prepared);
+            }
+        }
+
         if(!selected.analysis.destinationOnRight
                 && selected.route.liveClosureCount()==0
                 && selected.route.criticalCount()==0
@@ -150,6 +160,81 @@ public final class RouteCoordinator {
                     "Beste van "+all.size()+" routevarianten op veiligheid, voertuig, live hinder en leerdata; aankomstzijde is alleen voorkeur.");
         }
         return p;
+    }
+
+    private static Prepared tryAdaptiveDetours(Context context, Location start,
+                                                OnlineServices.SearchResult destination,
+                                                VehicleProfile vehicle,
+                                                Prepared base){
+        double[] hazard=firstHardPoint(base);
+        if(hazard==null)return null;
+
+        Prepared best=null;
+        for(int side:new int[]{-1,1}){
+            try{
+                double[] via=detourPoint(base.route,hazard[0],hazard[1],side,360.0);
+                OnlineServices.RouteResult r=OnlineServices.routeViaWaypoint(
+                        start.getLatitude(),start.getLongitude(),
+                        via[0],via[1],destination.lat,destination.lon);
+                if(r.distanceMeters>base.route.distanceMeters*1.35)continue;
+                if(r.durationSeconds>base.route.durationSeconds+600.0)continue;
+
+                Prepared p=enrich(context,r,destination,vehicle);
+                if(best==null || hardScore(p)<hardScore(best)
+                        || (hardScore(p)==hardScore(best)
+                        && p.analysis.score>best.analysis.score)){
+                    best=p;
+                }
+            }catch(Exception ignored){}
+        }
+        return best;
+    }
+
+    private static int hardScore(Prepared p){
+        if(p==null||p.route==null)return Integer.MAX_VALUE;
+        return p.route.liveClosureCount()*100+p.route.criticalCount()*20;
+    }
+
+    private static double[] firstHardPoint(Prepared p){
+        if(p==null||p.route==null)return null;
+        if(p.route.trafficEvents!=null){
+            for(LiveTrafficService.TrafficEvent e:p.route.trafficEvents)
+                if(e.closure)return new double[]{e.lat,e.lon};
+        }
+        if(p.route.restrictions!=null){
+            for(OnlineServices.Restriction r:p.route.restrictions)
+                if(r.critical)return new double[]{r.lat,r.lon};
+        }
+        return null;
+    }
+
+    private static double[] detourPoint(OnlineServices.RouteResult route,double lat,double lon,
+                                        int side,double meters){
+        int idx=OnlineServices.closestRoutePointIndex(lat,lon,route.points);
+        int a=Math.max(0,idx-1);
+        int b=Math.min(route.points.size()-1,idx+1);
+        double lat1=route.points.get(a).getLatitude();
+        double lon1=route.points.get(a).getLongitude();
+        double lat2=route.points.get(b).getLatitude();
+        double lon2=route.points.get(b).getLongitude();
+
+        double y=Math.sin(Math.toRadians(lon2-lon1))*Math.cos(Math.toRadians(lat2));
+        double x=Math.cos(Math.toRadians(lat1))*Math.sin(Math.toRadians(lat2))
+                -Math.sin(Math.toRadians(lat1))*Math.cos(Math.toRadians(lat2))
+                *Math.cos(Math.toRadians(lon2-lon1));
+        double bearing=(Math.toDegrees(Math.atan2(y,x))+360.0)%360.0;
+        double perpendicular=(bearing+(side<0?-90.0:90.0)+360.0)%360.0;
+
+        double earth=6371000.0;
+        double br=Math.toRadians(perpendicular);
+        double p1=Math.toRadians(lat);
+        double l1=Math.toRadians(lon);
+        double dr=meters/earth;
+        double p2=Math.asin(Math.sin(p1)*Math.cos(dr)
+                +Math.cos(p1)*Math.sin(dr)*Math.cos(br));
+        double l2=l1+Math.atan2(Math.sin(br)*Math.sin(dr)*Math.cos(p1),
+                Math.cos(dr)-Math.sin(p1)*Math.sin(p2));
+        return new double[]{Math.toDegrees(p2),Math.toDegrees(l2)};
     }
 
     private static boolean isPracticalDoorApproach(Prepared base, Prepared candidate){
