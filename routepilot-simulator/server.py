@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import re
 import sqlite3
 import threading
 import time
@@ -473,23 +474,17 @@ def _overpass_safe_endpoint(lat, lon):
 
 
 def safe_training_endpoint(name, lat, lon):
-    try:
-        p = _overpass_safe_endpoint(lat, lon)
-        return (
-            name,
-            float(p["lat"]),
-            float(p["lon"]),
-            p,
-        )
-    except Exception:
-        # Fail-safe: laat de simulator niet naar een willekeurige snelweg
-        # springen. De originele coördinaat mag alleen met een zeer kleine
-        # OSRM-snapradius worden gebruikt.
-        return (name, lat, lon, {
-            "lat": lat, "lon": lon, "distance_m": 0.0,
-            "highway": "unknown", "road_name": "",
-            "fallback": True,
-        })
+    # Concrete BAG-adressen zijn al betrouwbare doelen. Laat OSRM met een
+    # beperkte radius zelf naar het wegennet snappen en valideer daarna het
+    # werkelijke waypoint. Geen blokkerende Overpass-call meer.
+    return (name,lat,lon,{
+        "lat":lat,"lon":lon,"distance_m":0.0,
+        "highway":"unknown","road_name":"","source":"PDOK/BAG",
+    })
+
+def looks_like_motorway_name(name):
+    text=str(name or "").strip().upper().replace(" ","")
+    return bool(re.match(r"^(A|E)\d{1,4}(\b|$)",text))
 
 
 def min_distance_to_geometry(lat, lon, coords):
@@ -538,7 +533,7 @@ def route_score(route, corrections):
 
 
 def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
-    key_raw = f"exact-target-v3:{o_lat:.5f},{o_lon:.5f}>{d_lat:.5f},{d_lon:.5f}"
+    key_raw = f"async-pdok-v4:{o_lat:.5f},{o_lon:.5f}>{d_lat:.5f},{d_lon:.5f}"
     cache_key = hashlib.sha256(key_raw.encode()).hexdigest()
     with db_lock, db() as con:
         row = con.execute("SELECT response_json,created_at FROM route_cache WHERE cache_key=?", (cache_key,)).fetchone()
@@ -548,7 +543,7 @@ def cached_osrm_route(o_lat, o_lon, d_lat, d_lon):
     url = (
         f"{ROUTER}/route/v1/driving/{o_lon:.6f},{o_lat:.6f};{d_lon:.6f},{d_lat:.6f}"
         "?overview=full&geometries=geojson&steps=false&alternatives=3"
-        "&continue_straight=true&radiuses=38;38"
+        "&continue_straight=true&radiuses=55;55"
     )
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=12) as resp:
@@ -574,6 +569,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
     o_stop_name=d_stop_name=""
     o_target_stop=d_target_stop=0.0
 
+    success=False
     try:
         _, route_o_lat, route_o_lon, o_meta = safe_training_endpoint(
             original_o_name, original_o_lat, original_o_lon
@@ -598,6 +594,10 @@ def simulate_pair(batch_id, origin, destination, corrections):
         d_lon,d_lat=float(d_loc[0]),float(d_loc[1])
         o_stop_name=str(o_wp.get("name") or o_meta.get("road_name") or "route-stoppunt")
         d_stop_name=str(d_wp.get("name") or d_meta.get("road_name") or "route-stoppunt")
+        if looks_like_motorway_name(o_stop_name):
+            raise RuntimeError("Startpunt snapte naar een snelweg: "+o_stop_name)
+        if looks_like_motorway_name(d_stop_name):
+            raise RuntimeError("Eindpunt snapte naar een snelweg: "+d_stop_name)
 
         o_target_stop=haversine_m(original_o_lat,original_o_lon,o_lat,o_lon)
         d_target_stop=haversine_m(original_d_lat,original_d_lon,d_lat,d_lon)
@@ -647,6 +647,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
                 "geometry":r.get("geometry",{}).get("coordinates",[]),
             })
 
+        success=True
         row=(
             batch_id,
             original_o_name,o_lat,o_lon,
@@ -655,7 +656,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.3.2",
+            "3.4.0",
             float(chosen.get("distance",0)),float(chosen.get("duration",0)),
             float(score),len(hits),
             json.dumps(chosen.get("geometry",{}).get("coordinates",[]),separators=(",",":")),
@@ -671,7 +672,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
             original_d_lat,original_d_lon,
             o_stop_name,d_stop_name,
             o_target_stop,d_target_stop,
-            "3.3.2",
+            "3.4.0",
             0,0,0,0,"[]","[]","error","",str(exc)[:500],created,
         )
 
@@ -686,6 +687,7 @@ def simulate_pair(batch_id, origin, destination, corrections):
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             row,
         )
+    return success
 
 
 def simulate_batch(count, seed):
