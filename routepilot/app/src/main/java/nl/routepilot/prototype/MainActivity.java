@@ -4,12 +4,15 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
 import android.view.Gravity;
@@ -26,6 +29,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.osmdroid.config.Configuration;
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
 import org.osmdroid.util.BoundingBox;
@@ -34,9 +38,11 @@ import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.CopyrightOverlay;
 import org.osmdroid.views.overlay.Marker;
 import org.osmdroid.views.overlay.Polyline;
+import org.osmdroid.views.overlay.TilesOverlay;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -46,6 +52,7 @@ import java.util.Set;
 public class MainActivity extends Activity implements LocationListener, TextToSpeech.OnInitListener {
 
     private static final int LOCATION_REQUEST = 2002;
+    private static final int NOTIFICATION_REQUEST = 2003;
     private static final Locale NL = new Locale("nl", "NL");
 
     private final int BG = Color.rgb(9, 15, 27);
@@ -62,7 +69,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private Marker locationMarker;
     private Marker destinationMarker;
     private Polyline routeLine;
-    private final List<Marker> restrictionMarkers = new ArrayList<>();
+    private Polyline replayLine;
+    private final List<Marker> routeMarkers = new ArrayList<>();
 
     private LocationManager locationManager;
     private Location currentLocation;
@@ -71,19 +79,27 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private OnlineServices.SearchResult currentDestination;
     private OnlineServices.RouteResult currentRoute;
+    private RouteAnalysis.Result currentAnalysis;
 
     private boolean centeredOnce = false;
     private boolean navigating = false;
     private boolean followMode = true;
     private boolean routeLoading = false;
+    private boolean learnedThisDeviation = false;
 
     private long lastRerouteMs = 0L;
     private long lastTrafficRefreshMs = 0L;
     private int currentStepIndex = 0;
+    private int currentSpeedLimit = -1;
+    private double currentStepDistance = 0;
+    private String currentInstruction = "Volg de route";
+    private String currentWarning = "";
+
     private final Set<Integer> announcedApproachSteps = new HashSet<>();
     private final Set<Integer> announcedNearSteps = new HashSet<>();
     private final Set<Integer> announcedRestrictions = new HashSet<>();
     private final Set<Integer> announcedTrafficEvents = new HashSet<>();
+    private final Set<String> announcedRoadSigns = new HashSet<>();
 
     private EditText destinationInput;
     private TextView gpsStatus;
@@ -95,6 +111,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private TextView navDistance;
     private TextView navMeta;
     private TextView navStatus;
+    private TextView navSpeed;
+    private TextView navScore;
     private Button routeButton;
     private Button startButton;
     private Button favoriteButton;
@@ -131,11 +149,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         map.getOverlays().add(new CopyrightOverlay(this));
 
         LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.52f);
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.54f);
         root.addView(map, mapLp);
 
         ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(false);
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(12), dp(16), dp(24));
@@ -143,7 +160,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         scroll.addView(panel);
 
         LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.48f);
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.46f);
         root.addView(scroll, scrollLp);
 
         buildHeader(panel);
@@ -153,16 +170,19 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         buildNavigation(panel);
 
         TextView disclaimer = text(
-                "RoutePilot V1 debug • voertuigwaarschuwingen zijn ondersteunend. Verkeersborden, wegafzettingen en actuele regels blijven leidend.",
+                "RoutePilot V2 debug • OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
                 10, MUTED, Typeface.NORMAL);
         disclaimer.setGravity(Gravity.CENTER);
         disclaimer.setPadding(0, dp(12), 0, 0);
         panel.addView(disclaimer);
 
         setContentView(root);
+        applyAutoNightMode();
         refreshVehicleSummary();
         refreshSavedPlaces();
         startLocation();
+        requestNotificationPermissionIfNeeded();
+        handleNavigationIntent(getIntent());
     }
 
     private void buildHeader(LinearLayout panel) {
@@ -173,30 +193,36 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
         titles.addView(text("ROUTEPILOT", 14, BLUE, Typeface.BOLD));
-        titles.addView(text("V1 debug • online rijassistent", 11, MUTED, Typeface.NORMAL));
-        row.addView(titles, new LinearLayout.LayoutParams(0, dp(46), 1f));
+        titles.addView(text("V2 debug • rolstoelbus-navigatie", 11, MUTED, Typeface.NORMAL));
+        row.addView(titles, new LinearLayout.LayoutParams(0, dp(48), 1f));
 
-        Button gps = smallButton("◎ GPS");
-        gps.setOnClickListener(v -> {
-            followMode = true;
-            centerOnMe();
-        });
-        row.addView(gps, new LinearLayout.LayoutParams(dp(78), dp(40)));
+        Button dashboard = darkButton("▦");
+        dashboard.setContentDescription("Dashboard");
+        dashboard.setOnClickListener(v ->
+                startActivity(new Intent(this, DashboardActivity.class)));
+        row.addView(dashboard, new LinearLayout.LayoutParams(dp(48), dp(40)));
+
+        Button replay = darkButton("↺");
+        replay.setContentDescription("Laatste rit replay");
+        replay.setOnClickListener(v -> replayLatestTrip());
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(dp(48), dp(40));
+        rp.leftMargin = dp(5);
+        row.addView(replay, rp);
 
         Button settings = darkButton("⚙");
-        LinearLayout.LayoutParams settingsLp = new LinearLayout.LayoutParams(dp(52), dp(40));
-        settingsLp.leftMargin = dp(6);
-        row.addView(settings, settingsLp);
         settings.setOnClickListener(v -> showVehicleSettings());
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(48), dp(40));
+        sp.leftMargin = dp(5);
+        row.addView(settings, sp);
 
         panel.addView(row);
 
         gpsStatus = text("Locatie wordt gestart…", 11, MUTED, Typeface.NORMAL);
-        gpsStatus.setPadding(0, 0, 0, dp(7));
+        gpsStatus.setPadding(0, 0, 0, dp(6));
         panel.addView(gpsStatus);
 
         vehicleSummary = text("", 11, GREEN, Typeface.BOLD);
-        vehicleSummary.setPadding(0, 0, 0, dp(9));
+        vehicleSummary.setPadding(0, 0, 0, dp(8));
         panel.addView(vehicleSummary);
     }
 
@@ -204,11 +230,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         searchArea = new LinearLayout(this);
         searchArea.setOrientation(LinearLayout.VERTICAL);
 
-        LinearLayout searchRow = new LinearLayout(this);
-        searchRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
 
         destinationInput = new EditText(this);
-        destinationInput.setHint("Adres, plaats of bestemming");
+        destinationInput.setHint("Adres, woning, zorglocatie of plaats");
         destinationInput.setHintTextColor(MUTED);
         destinationInput.setTextColor(TEXT);
         destinationInput.setTextSize(15);
@@ -219,19 +245,19 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         routeButton = smallButton("Route");
         routeButton.setOnClickListener(v -> searchAndRoute());
 
-        searchRow.addView(destinationInput, new LinearLayout.LayoutParams(0, dp(50), 1f));
-        LinearLayout.LayoutParams sb = new LinearLayout.LayoutParams(dp(88), dp(50));
-        sb.leftMargin = dp(8);
-        searchRow.addView(routeButton, sb);
+        row.addView(destinationInput, new LinearLayout.LayoutParams(0, dp(50), 1f));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(88), dp(50));
+        bp.leftMargin = dp(8);
+        row.addView(routeButton, bp);
 
-        searchArea.addView(searchRow);
+        searchArea.addView(row);
         panel.addView(searchArea);
     }
 
     private void buildSavedPlaces(LinearLayout panel) {
-        TextView savedLabel = text("FAVORIETEN & RECENT", 10, MUTED, Typeface.BOLD);
-        savedLabel.setPadding(0, dp(11), 0, dp(5));
-        panel.addView(savedLabel);
+        TextView label = text("FAVORIETEN & RECENT", 10, MUTED, Typeface.BOLD);
+        label.setPadding(0, dp(10), 0, dp(4));
+        panel.addView(label);
 
         HorizontalScrollView hsv = new HorizontalScrollView(this);
         hsv.setHorizontalScrollBarEnabled(false);
@@ -261,79 +287,112 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         warningText.setBackground(rounded(PANEL_2, 11));
         previewArea.addView(warningText);
 
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
-        actions.setPadding(0, dp(10), 0, 0);
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.setPadding(0, dp(9), 0, 0);
+
+        Button why = darkButton("Waarom deze route?");
+        why.setOnClickListener(v -> showWhyRoute());
+        row1.addView(why, new LinearLayout.LayoutParams(0, dp(44), 1f));
+
+        Button profile = darkButton("Locatieprofiel");
+        profile.setOnClickListener(v -> showLocationProfileDialog());
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        pp.leftMargin = dp(7);
+        row1.addView(profile, pp);
+        previewArea.addView(row1);
+
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setPadding(0, dp(8), 0, 0);
 
         favoriteButton = darkButton("☆ Favoriet");
         favoriteButton.setOnClickListener(v -> toggleFavorite());
-        actions.addView(favoriteButton, new LinearLayout.LayoutParams(0, dp(48), 0.42f));
+        row2.addView(favoriteButton, new LinearLayout.LayoutParams(0, dp(48), 0.42f));
 
         startButton = smallButton("Start navigatie");
         startButton.setOnClickListener(v -> startNavigation());
         LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(0, dp(48), 0.58f);
         startLp.leftMargin = dp(8);
-        actions.addView(startButton, startLp);
+        row2.addView(startButton, startLp);
+        previewArea.addView(row2);
 
-        previewArea.addView(actions);
         panel.addView(previewArea);
-
-        LinearLayout.LayoutParams previewLp =
-                (LinearLayout.LayoutParams) previewArea.getLayoutParams();
-        previewLp.topMargin = dp(11);
-        previewArea.setLayoutParams(previewLp);
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) previewArea.getLayoutParams();
+        lp.topMargin = dp(10);
+        previewArea.setLayoutParams(lp);
     }
 
     private void buildNavigation(LinearLayout panel) {
         navArea = new LinearLayout(this);
         navArea.setOrientation(LinearLayout.VERTICAL);
         navArea.setVisibility(View.GONE);
-        navArea.setPadding(dp(13), dp(13), dp(13), dp(13));
+        navArea.setPadding(dp(14), dp(13), dp(14), dp(13));
         navArea.setBackground(rounded(PANEL, 15));
 
-        navStatus = text("NAVIGATIE ACTIEF", 10, GREEN, Typeface.BOLD);
+        navStatus = text("NAVIGATIE ACTIEF", 11, GREEN, Typeface.BOLD);
         navArea.addView(navStatus);
 
-        navDistance = text("—", 28, BLUE, Typeface.BOLD);
-        navDistance.setPadding(0, dp(4), 0, 0);
+        navDistance = text("—", 31, BLUE, Typeface.BOLD);
+        navDistance.setPadding(0, dp(3), 0, 0);
         navArea.addView(navDistance);
 
-        navInstruction = text("Volg de route", 21, TEXT, Typeface.BOLD);
-        navInstruction.setPadding(0, 0, 0, dp(4));
+        navInstruction = text("Volg de route", 22, TEXT, Typeface.BOLD);
+        navInstruction.setPadding(0, 0, 0, dp(5));
         navArea.addView(navInstruction);
 
+        LinearLayout gauges = new LinearLayout(this);
+        gauges.setOrientation(LinearLayout.HORIZONTAL);
+
+        navSpeed = text("MAX —", 16, TEXT, Typeface.BOLD);
+        navSpeed.setGravity(Gravity.CENTER);
+        navSpeed.setPadding(dp(8), dp(7), dp(8), dp(7));
+        navSpeed.setBackground(rounded(PANEL_2, 10));
+        gauges.addView(navSpeed, new LinearLayout.LayoutParams(0, dp(42), 1f));
+
+        navScore = text("ROUTE —", 13, GREEN, Typeface.BOLD);
+        navScore.setGravity(Gravity.CENTER);
+        navScore.setPadding(dp(8), dp(7), dp(8), dp(7));
+        navScore.setBackground(rounded(PANEL_2, 10));
+        LinearLayout.LayoutParams gp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+        gp.leftMargin = dp(7);
+        gauges.addView(navScore, gp);
+        navArea.addView(gauges);
+
         navMeta = text("", 12, MUTED, Typeface.NORMAL);
+        navMeta.setPadding(0, dp(7), 0, 0);
         navArea.addView(navMeta);
 
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.setPadding(0, dp(10), 0, 0);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(0, dp(9), 0, 0);
 
         Button follow = darkButton("◎ Volgen");
-        follow.setOnClickListener(v -> {
-            followMode = true;
-            centerOnMe();
-        });
-        buttons.addView(follow, new LinearLayout.LayoutParams(0, dp(46), 1f));
+        follow.setOnClickListener(v -> { followMode = true; centerOnMe(); });
+        row.addView(follow, new LinearLayout.LayoutParams(0, dp(46), 1f));
 
-        Button arrived = darkButton("✓ Aangekomen");
+        Button report = darkButton("⚠ Meld");
+        report.setOnClickListener(v -> showDriverReportDialog());
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        rp.leftMargin = dp(6);
+        row.addView(report, rp);
+
+        Button arrived = darkButton("✓ Aankomst");
         arrived.setOnClickListener(v -> arrive());
-        LinearLayout.LayoutParams arrivedLp = new LinearLayout.LayoutParams(0, dp(46), 1f);
-        arrivedLp.leftMargin = dp(7);
-        buttons.addView(arrived, arrivedLp);
+        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        ap.leftMargin = dp(6);
+        row.addView(arrived, ap);
 
         Button stop = dangerButton("Stop");
         stop.setOnClickListener(v -> stopNavigation(false));
-        LinearLayout.LayoutParams stopLp = new LinearLayout.LayoutParams(0, dp(46), 0.72f);
-        stopLp.leftMargin = dp(7);
-        buttons.addView(stop, stopLp);
+        LinearLayout.LayoutParams stp = new LinearLayout.LayoutParams(0, dp(46), 0.72f);
+        stp.leftMargin = dp(6);
+        row.addView(stop, stp);
 
-        navArea.addView(buttons);
+        navArea.addView(row);
         panel.addView(navArea);
-
-        LinearLayout.LayoutParams navLp =
-                (LinearLayout.LayoutParams) navArea.getLayoutParams();
-        navLp.topMargin = dp(10);
+        LinearLayout.LayoutParams navLp = (LinearLayout.LayoutParams) navArea.getLayoutParams();
+        navLp.topMargin = dp(9);
         navArea.setLayoutParams(navLp);
     }
 
@@ -346,21 +405,23 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             }, LOCATION_REQUEST);
             return;
         }
-
         try {
             gpsStatus.setText("GPS actief • wacht op positie…");
-            locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER, 1000L, 2f, this);
-            locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER, 2500L, 8f, this);
-
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 2f, this);
+            locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 2500L, 8f, this);
             Location last = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-            if (last == null) {
-                last = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-            }
+            if (last == null) last = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
             if (last != null) onLocationChanged(last);
         } catch (Exception e) {
             gpsStatus.setText("Kon locatie niet starten: " + e.getMessage());
+        }
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_REQUEST);
         }
     }
 
@@ -368,11 +429,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (requestCode == LOCATION_REQUEST) {
-            if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
-                startLocation();
-            } else {
-                gpsStatus.setText("Locatietoegang geweigerd.");
-            }
+            if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) startLocation();
+            else gpsStatus.setText("Locatietoegang geweigerd.");
         }
     }
 
@@ -380,13 +438,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     public void onLocationChanged(Location location) {
         if (currentLocation != null
                 && location.getAccuracy() > 80
-                && currentLocation.getAccuracy() < location.getAccuracy()) {
-            return;
-        }
+                && currentLocation.getAccuracy() < location.getAccuracy()) return;
 
         currentLocation = location;
-        GeoPoint point = new GeoPoint(location.getLatitude(), location.getLongitude());
+        RoutePilotState.updatePosition(this, location.getLatitude(), location.getLongitude());
 
+        GeoPoint point = new GeoPoint(location.getLatitude(), location.getLongitude());
         if (locationMarker == null) {
             locationMarker = new Marker(map);
             locationMarker.setTitle("Mijn locatie");
@@ -397,8 +454,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         int accuracy = Math.round(location.getAccuracy());
         double kmh = location.hasSpeed() ? Math.max(0, location.getSpeed() * 3.6) : 0;
-        gpsStatus.setText(String.format(NL,
-                "GPS ±%d m • %.0f km/u", accuracy, kmh));
+        gpsStatus.setText(String.format(NL, "GPS ±%d m • %.0f km/u%s",
+                accuracy, kmh, MunicipalityService.isInTilburg(
+                        location.getLatitude(), location.getLongitude())
+                        ? " • Tilburg-profiel" : ""));
 
         if (!centeredOnce) {
             centeredOnce = true;
@@ -406,7 +465,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             map.getController().animateTo(point);
         }
 
-        if (navigating) updateNavigationProgress(location);
+        if (navigating) {
+            RoutePilotStore.appendTrack(this, location.getLatitude(), location.getLongitude(),
+                    location.hasSpeed() ? location.getSpeed() : 0f);
+            updateNavigationProgress(location);
+        }
         map.invalidate();
     }
 
@@ -420,11 +483,10 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             Toast.makeText(this, "Wacht eerst op je GPS-positie.", Toast.LENGTH_LONG).show();
             return;
         }
-
         hideKeyboard();
         setRouteLoading(true);
-        routeTitle.setText("Bestemming zoeken…");
         previewArea.setVisibility(View.VISIBLE);
+        routeTitle.setText("RoutePilot analyseert…");
 
         new Thread(() -> {
             try {
@@ -445,262 +507,149 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         setRouteLoading(true);
         OnlineServices.SearchResult destination =
                 new OnlineServices.SearchResult(item.lat, item.lon, item.label);
-
         new Thread(() -> {
-            try {
-                calculateRouteInWorker(destination, false);
-            } catch (Exception e) {
-                showRouteError(e);
-            }
+            try { calculateRouteInWorker(destination, false); }
+            catch (Exception e) { showRouteError(e); }
         }).start();
     }
 
     private void calculateRouteInWorker(OnlineServices.SearchResult destination,
                                         boolean isReroute) throws Exception {
-        List<OnlineServices.RouteResult> candidates = OnlineServices.routeCandidates(
-                currentLocation.getLatitude(),
-                currentLocation.getLongitude(),
-                destination.lat,
-                destination.lon
-        );
+        if (currentLocation == null) throw new IllegalStateException("Geen GPS-positie.");
 
-        OnlineServices.RouteResult selected = candidates.get(0);
-        String scanNote = "";
-
-        boolean vehicleScanOk = true;
-        boolean trafficScanOk = true;
-
-        try {
-            selected.restrictions = OnlineServices.scanRestrictions(selected, vehicle);
-        } catch (Exception scanError) {
-            vehicleScanOk = false;
-        }
-
-        try {
-            selected.trafficEvents = LiveTrafficService.eventsNearRoute(selected.points);
-        } catch (Exception trafficError) {
-            trafficScanOk = false;
-        }
-
-        if ((selected.criticalCount() > 0 || selected.liveClosureCount() > 0)
-                && candidates.size() > 1) {
-            OnlineServices.RouteResult alternative = candidates.get(1);
-
-            try {
-                alternative.restrictions = OnlineServices.scanRestrictions(alternative, vehicle);
-            } catch (Exception scanError) {
-                vehicleScanOk = false;
-            }
-
-            try {
-                alternative.trafficEvents = LiveTrafficService.eventsNearRoute(alternative.points);
-            } catch (Exception trafficError) {
-                trafficScanOk = false;
-            }
-
-            OnlineServices.RouteResult safer =
-                    OnlineServices.chooseSafer(selected, alternative);
-
-            if (safer == alternative) {
-                safer.selectionNote = "Alternatieve route gekozen door live route- en voertuigscan.";
-                selected = safer;
-            }
-        }
-
-        if ((selected.criticalCount() > 0 || selected.liveClosureCount() > 0)
-                && candidates.size() > 2) {
-            OnlineServices.RouteResult third = candidates.get(2);
-
-            try {
-                third.restrictions = OnlineServices.scanRestrictions(third, vehicle);
-            } catch (Exception scanError) {
-                vehicleScanOk = false;
-            }
-
-            try {
-                third.trafficEvents = LiveTrafficService.eventsNearRoute(third.points);
-            } catch (Exception trafficError) {
-                trafficScanOk = false;
-            }
-
-            OnlineServices.RouteResult saferAgain =
-                    OnlineServices.chooseSafer(selected, third);
-            if (saferAgain == third) {
-                saferAgain.selectionNote = "Derde route gekozen door live route- en voertuigscan.";
-                selected = saferAgain;
-            }
-        }
-
-        if (!vehicleScanOk && !trafficScanOk) {
-            scanNote = "Voertuigscan en actuele NDW-afsluitingen tijdelijk niet volledig beschikbaar.";
-        } else if (!vehicleScanOk) {
-            scanNote = "Voertuigscan tijdelijk niet volledig beschikbaar.";
-        } else if (!trafficScanOk) {
-            scanNote = "Actuele NDW-afsluitingen tijdelijk niet volledig beschikbaar.";
-        }
-
-        final OnlineServices.RouteResult finalRoute = selected;
-        final String finalScanNote = scanNote;
+        RouteCoordinator.Prepared prepared =
+                RouteCoordinator.prepare(this, currentLocation, destination, vehicle);
 
         runOnUiThread(() -> {
             currentDestination = destination;
-            currentRoute = finalRoute;
+            currentRoute = prepared.route;
+            currentAnalysis = prepared.analysis;
             DestinationStore.addRecent(this, destination.toStoredItem());
             refreshSavedPlaces();
 
-            if (isReroute && navigating) {
-                applyReroute(finalScanNote);
-            } else {
-                showRoutePreview(finalScanNote);
-            }
+            if (isReroute && navigating) applyReroute(prepared.note);
+            else showRoutePreview(prepared.note);
             setRouteLoading(false);
         });
     }
 
-    private void showRoutePreview(String scanNote) {
+    private void showRoutePreview(String note) {
         drawCurrentRoute();
         showDestinationMarker();
         fitRoute(currentRoute.points);
 
         double km = currentRoute.distanceMeters / 1000.0;
         int minutes = (int) Math.round(currentRoute.durationSeconds / 60.0);
+        routeTitle.setText(String.format(NL, "%.1f km • %d min • %d/100 %s",
+                km, minutes, currentAnalysis.score, currentAnalysis.label));
 
-        routeTitle.setText(String.format(NL, "%.1f km • %d min", km, minutes));
-
-        String meta = shortLabel(currentDestination.label);
-        if (!currentRoute.selectionNote.isEmpty()) {
-            meta += " • " + currentRoute.selectionNote;
-        }
+        String side = currentAnalysis.destinationOnRight
+                ? "rechterdeur aan ingangzijde ✓"
+                : "ingangzijde rechts niet bevestigd ⚠";
+        String meta = shortLabel(currentDestination.label) + " • " + side;
+        if (!currentRoute.selectionNote.isEmpty()) meta += "\n" + currentRoute.selectionNote;
+        if (note != null && !note.isEmpty()) meta += "\n" + note;
         routeMeta.setText(meta);
 
-        warningText.setText(buildRestrictionSummary(scanNote));
-        warningText.setTextColor(restrictionSummaryColor());
+        warningText.setText(buildRouteSummary());
+        warningText.setTextColor(currentAnalysis.score < 58 ? RED
+                : currentAnalysis.score < 82 ? ORANGE : GREEN);
 
         favoriteButton.setText(
                 DestinationStore.isFavorite(this, currentDestination.toStoredItem())
-                        ? "★ Favoriet" : "☆ Favoriet"
-        );
-
+                        ? "★ Favoriet" : "☆ Favoriet");
         previewArea.setVisibility(View.VISIBLE);
         startButton.setEnabled(true);
     }
 
-    private String buildRestrictionSummary(String scanNote) {
-        int critical = currentRoute == null ? 0 : currentRoute.criticalCount();
-        int caution = currentRoute == null ? 0 : currentRoute.cautionCount();
-        int closures = currentRoute == null ? 0 : currentRoute.liveClosureCount();
-        int liveEvents = currentRoute == null || currentRoute.trafficEvents == null
-                ? 0 : currentRoute.trafficEvents.size();
-        int info = 0;
-        if (currentRoute != null) {
-            for (OnlineServices.Restriction r : currentRoute.restrictions) {
-                if (r.informational) info++;
-            }
-        }
+    private String buildRouteSummary() {
+        int live = currentRoute.trafficEvents == null ? 0 : currentRoute.trafficEvents.size();
+        int signs = currentRoute.roadSigns == null ? 0 : currentRoute.roadSigns.size();
+        StringBuilder b = new StringBuilder();
 
-        StringBuilder sb = new StringBuilder();
+        if (currentRoute.liveClosureCount() > 0)
+            b.append("🚧 ").append(currentRoute.liveClosureCount()).append(" actuele afsluiting(en) • ");
+        b.append(currentRoute.criticalCount()).append(" kritieke beperking(en) • ")
+                .append(currentRoute.cautionCount()).append(" aandachtspunt(en)");
+        if (live > 0) b.append("\n📡 ").append(live).append(" actuele NDW-verkeersmelding(en)");
+        if (signs > 0) b.append("\n🛑 ").append(signs).append(" officiële NDW-borden langs route");
 
-        if (liveEvents > 0) {
-            sb.append("📡 NDW ACTUEEL: ").append(liveEvents)
-                    .append(liveEvents == 1 ? " verkeersmelding" : " verkeersmeldingen");
-            if (closures > 0) {
-                sb.append(" • ").append(closures)
-                        .append(closures == 1 ? " afsluiting" : " afsluitingen");
-            }
-            sb.append(" langs deze route.");
+        int busInfo = 0;
+        for (OnlineServices.Restriction r : currentRoute.restrictions)
+            if ("BUSBAAN".equals(r.type) && r.informational) busInfo++;
+        if (busInfo > 0)
+            b.append("\n🚌 ").append(busInfo)
+                    .append(" busbaansegment(en) toegestaan via Tilburg-profiel");
 
-            int shownLive = 0;
-            for (LiveTrafficService.TrafficEvent e : currentRoute.trafficEvents) {
-                if (shownLive >= 4) break;
-                sb.append("\n• ").append(e.type).append(": ").append(e.description);
-                shownLive++;
-            }
-            sb.append("\n");
-        }
-
-        if (critical == 0 && caution == 0) {
-            sb.append("✓ Geen kritieke maat-, gewicht- of bussluisbeperking gevonden in de OSM-routescan.");
-        } else {
-            sb.append("⚠ ").append(critical).append(" kritisch • ")
-                    .append(caution).append(" voertuig-aandachtspunt");
-            if (caution != 1) sb.append("en");
-
-            int shown = 0;
-            for (OnlineServices.Restriction r : currentRoute.restrictions) {
-                if (r.informational) continue;
-                if (shown >= 3) break;
-                sb.append("\n• ").append(r.type).append(": ").append(r.description);
-                shown++;
-            }
-        }
-
-        if (info > 0) {
-            sb.append("\n• ").append(info)
-                    .append(" busbaan/bustoegang herkend als toegestaan profielsignaal.");
-        }
-        if (scanNote != null && !scanNote.isEmpty()) {
-            sb.append("\n").append(scanNote);
-        }
-        sb.append("\nBronnen: OpenStreetMap + actuele NDW-afsluitingen. Controleer ter plaatse altijd de bebording.");
-        return sb.toString();
-    }
-
-    private int restrictionSummaryColor() {
-        if (currentRoute == null) return MUTED;
-        if (currentRoute.liveClosureCount() > 0) return RED;
-        if (currentRoute.criticalCount() > 0) return RED;
-        if (currentRoute.cautionCount() > 0) return ORANGE;
-        if (currentRoute.trafficEvents != null && !currentRoute.trafficEvents.isEmpty()) return ORANGE;
-        return GREEN;
+        if (currentAnalysis.learnedPenalty > 0)
+            b.append("\n🧠 Leerlaag: eerder vermeden punten beïnvloeden deze route.");
+        b.append("\n🚪 Rechterdeurvoorkeur: ")
+                .append(currentAnalysis.destinationOnRight ? "gehaald." : "niet betrouwbaar gehaald.");
+        return b.toString();
     }
 
     private void startNavigation() {
-        if (currentRoute == null || currentDestination == null || currentLocation == null) return;
+        if (currentRoute == null || currentDestination == null
+                || currentLocation == null || currentAnalysis == null) return;
 
         navigating = true;
         followMode = true;
+        learnedThisDeviation = false;
         announcedApproachSteps.clear();
         announcedNearSteps.clear();
         announcedRestrictions.clear();
         announcedTrafficEvents.clear();
+        announcedRoadSigns.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
         lastRerouteMs = System.currentTimeMillis();
         lastTrafficRefreshMs = System.currentTimeMillis();
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
         searchArea.setVisibility(View.GONE);
         savedPlaces.setVisibility(View.GONE);
         previewArea.setVisibility(View.GONE);
         navArea.setVisibility(View.VISIBLE);
 
+        RoutePilotStore.beginTrip(this, currentDestination.label, currentRoute.distanceMeters);
+        RoutePilotState.saveRoute(this, currentRoute);
+        RoutePilotState.update(this, true, "Navigatie gestart", "", 0,
+                currentRoute.distanceMeters,
+                System.currentTimeMillis() + (long)(currentRoute.durationSeconds * 1000),
+                -1, currentAnalysis.score, currentDestination.label);
+
+        Intent service = new Intent(this, NavigationService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
+        else startService(service);
+
         map.getController().setZoom(17.0);
         centerOnMe();
-
-        speak("Navigatie gestart. RoutePilot bewaakt de route en voertuigbeperkingen.");
+        speak("Navigatie gestart. RoutePilot bewaakt live verkeer, verkeersborden, voertuigbeperkingen en aankomstzijde.");
         updateNavigationProgress(currentLocation);
     }
 
     private void updateNavigationProgress(Location location) {
         if (!navigating || currentRoute == null || currentDestination == null) return;
 
-        double lat = location.getLatitude();
-        double lon = location.getLongitude();
+        double lat = location.getLatitude(), lon = location.getLongitude();
         int routeIndex = OnlineServices.closestRoutePointIndex(lat, lon, currentRoute.points);
         double offRoute = OnlineServices.distanceFromRouteMeters(lat, lon, currentRoute.points);
 
-        if (offRoute > 110
-                && !routeLoading
+        if (offRoute < 55) learnedThisDeviation = false;
+
+        if (offRoute > 110 && !routeLoading
                 && System.currentTimeMillis() - lastRerouteMs > 18000) {
+            if (!learnedThisDeviation && location.getAccuracy() <= 45) {
+                RoutePilotStore.learnAvoidance(this, lat, lon, "herhaalde afwijking van voorgestelde route");
+                learnedThisDeviation = true;
+            }
+            RoutePilotStore.markReroute(this);
             lastRerouteMs = System.currentTimeMillis();
             navStatus.setText("HERROUTEREN…");
             speak("Je bent van de route afgeweken. Nieuwe route wordt berekend.");
             setRouteLoading(true);
-
             new Thread(() -> {
-                try {
-                    calculateRouteInWorker(currentDestination, true);
-                } catch (Exception e) {
+                try { calculateRouteInWorker(currentDestination, true); }
+                catch (Exception e) {
                     runOnUiThread(() -> {
                         navStatus.setText("NAVIGATIE ACTIEF • herrouteren mislukt");
                         setRouteLoading(false);
@@ -712,22 +661,32 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         double remaining = OnlineServices.remainingRouteDistanceMeters(
                 Math.max(0, routeIndex), currentRoute.points);
         double remainingSeconds = currentRoute.distanceMeters > 1
-                ? currentRoute.durationSeconds * (remaining / currentRoute.distanceMeters)
-                : 0;
+                ? currentRoute.durationSeconds * (remaining / currentRoute.distanceMeters) : 0;
+        long etaMs = System.currentTimeMillis() + (long)(remainingSeconds * 1000);
+        String etaText = new SimpleDateFormat("HH:mm", NL).format(new Date(etaMs));
 
-        Date eta = new Date(System.currentTimeMillis() + (long) (remainingSeconds * 1000));
-        String etaText = new SimpleDateFormat("HH:mm", NL).format(eta);
+        currentSpeedLimit = RoadDataService.speedLimitAt(routeIndex, currentRoute.roadSigns);
+        if (currentSpeedLimit <= 0) navSpeed.setText("MAX —");
+        else navSpeed.setText("MAX " + currentSpeedLimit);
+
+        navScore.setText("ROUTE " + currentAnalysis.score + "/100");
+        navScore.setTextColor(currentAnalysis.score >= 82 ? GREEN
+                : currentAnalysis.score >= 58 ? ORANGE : RED);
 
         double kmh = location.hasSpeed() ? Math.max(0, location.getSpeed() * 3.6) : 0;
         navMeta.setText(String.format(NL,
-                "%.1f km resterend • aankomst %s • %.0f km/u",
-                remaining / 1000.0, etaText, kmh));
+                "%.1f km resterend • aankomst %s • %.0f km/u%s",
+                remaining / 1000.0, etaText, kmh,
+                currentAnalysis.destinationOnRight ? " • 🚪 rechts" : " • 🚪 controle"));
 
         updateStepGuidance(lat, lon);
-        updateRestrictionWarnings(lat, lon);
+        updateGeofencedWarnings(lat, lon, routeIndex);
 
-        if (!routeLoading
-                && System.currentTimeMillis() - lastTrafficRefreshMs > 130_000L) {
+        RoutePilotState.update(this, true, currentInstruction, currentWarning,
+                currentStepDistance, remaining, etaMs,
+                currentSpeedLimit, currentAnalysis.score, currentDestination.label);
+
+        if (!routeLoading && System.currentTimeMillis() - lastTrafficRefreshMs > 130_000L) {
             lastTrafficRefreshMs = System.currentTimeMillis();
             refreshLiveTraffic();
         }
@@ -745,54 +704,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         }
     }
 
-    private void refreshLiveTraffic() {
-        if (currentRoute == null || currentDestination == null || !navigating) return;
-
-        final OnlineServices.RouteResult routeSnapshot = currentRoute;
-        new Thread(() -> {
-            try {
-                List<LiveTrafficService.TrafficEvent> events =
-                        LiveTrafficService.eventsNearRoute(routeSnapshot.points);
-                int oldClosures = routeSnapshot.liveClosureCount();
-                int newClosures = 0;
-                for (LiveTrafficService.TrafficEvent e : events) {
-                    if (e.closure) newClosures++;
-                }
-
-                final int finalNewClosures = newClosures;
-                runOnUiThread(() -> {
-                    if (currentRoute != routeSnapshot) return;
-                    currentRoute.trafficEvents = events;
-                    drawCurrentRoute();
-
-                    if (finalNewClosures > oldClosures && !routeLoading) {
-                        navStatus.setText("🚧 NIEUWE ACTUELE AFSLUITING • HERROUTEREN");
-                        speak("Nieuwe actuele afsluiting op of vlak langs de route. "
-                                + "RoutePilot berekent opnieuw.");
-                        lastRerouteMs = System.currentTimeMillis();
-                        setRouteLoading(true);
-                        new Thread(() -> {
-                            try {
-                                calculateRouteInWorker(currentDestination, true);
-                            } catch (Exception e) {
-                                runOnUiThread(() -> {
-                                    navStatus.setText("🚧 AFSLUITING • herrouteren mislukt");
-                                    setRouteLoading(false);
-                                });
-                            }
-                        }).start();
-                    }
-                });
-            } catch (Exception ignored) {
-                // Behoud de laatst bekende live verkeerslaag als NDW tijdelijk niet bereikbaar is.
-            }
-        }).start();
-    }
-
     private void updateStepGuidance(double lat, double lon) {
         if (currentRoute.steps == null || currentRoute.steps.isEmpty()) {
+            currentInstruction = "Volg de route";
+            currentStepDistance = 0;
             navDistance.setText("—");
-            navInstruction.setText("Volg de route");
+            navInstruction.setText(currentInstruction);
             return;
         }
 
@@ -806,6 +723,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             distance = OnlineServices.distanceMeters(lat, lon, step.lat, step.lon);
         }
 
+        currentStepDistance = distance;
+        currentInstruction = step.instruction;
         navDistance.setText(formatDistance(distance));
         navInstruction.setText(step.instruction);
 
@@ -813,93 +732,168 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             announcedApproachSteps.add(currentStepIndex);
             speak("Over " + spokenDistance(distance) + ". " + step.instruction);
         }
-
         if (distance < 95 && !announcedNearSteps.contains(currentStepIndex)) {
             announcedNearSteps.add(currentStepIndex);
             speak(step.instruction);
         }
     }
 
-    private void updateRestrictionWarnings(double lat, double lon) {
-        if (currentRoute.restrictions != null) {
-            for (int i = 0; i < currentRoute.restrictions.size(); i++) {
-                if (announcedRestrictions.contains(i)) continue;
-                OnlineServices.Restriction r = currentRoute.restrictions.get(i);
-                if (r.informational) continue;
+    private void updateGeofencedWarnings(double lat, double lon, int routeIndex) {
+        currentWarning = "";
 
-                double d = OnlineServices.distanceMeters(lat, lon, r.lat, r.lon);
-                if (d < 420) {
-                    announcedRestrictions.add(i);
-                    if (r.critical) {
-                        navStatus.setText("⚠ KRITIEKE VOERTUIGWAARSCHUWING");
-                        speak("Let op. " + r.type + ". " + r.description
-                                + " Controleer de bebording.");
-                    } else {
-                        speak("Let op. Aandachtspunt voor " + r.type + ". "
-                                + r.description);
-                    }
-                }
+        for (int i = 0; i < currentRoute.restrictions.size(); i++) {
+            if (announcedRestrictions.contains(i)) continue;
+            OnlineServices.Restriction r = currentRoute.restrictions.get(i);
+            if (r.informational) continue;
+            int target = OnlineServices.closestRoutePointIndex(r.lat, r.lon, currentRoute.points);
+            if (!isAhead(routeIndex, target)) continue;
+            double d = OnlineServices.distanceMeters(lat, lon, r.lat, r.lon);
+            if (d < (r.critical ? 520 : 360)) {
+                announcedRestrictions.add(i);
+                currentWarning = r.type + ": " + r.description;
+                RoutePilotStore.markWarning(this);
+                navStatus.setText(r.critical
+                        ? "⚠ KRITIEKE VOERTUIGWAARSCHUWING" : "⚠ ROUTE-AANDACHTSPUNT");
+                speak("Let op. " + r.type + ". " + r.description);
             }
         }
 
-        if (currentRoute.trafficEvents != null) {
-            for (int i = 0; i < currentRoute.trafficEvents.size(); i++) {
-                if (announcedTrafficEvents.contains(i)) continue;
-                LiveTrafficService.TrafficEvent e = currentRoute.trafficEvents.get(i);
+        for (int i = 0; i < currentRoute.trafficEvents.size(); i++) {
+            if (announcedTrafficEvents.contains(i)) continue;
+            LiveTrafficService.TrafficEvent e = currentRoute.trafficEvents.get(i);
+            int target = OnlineServices.closestRoutePointIndex(e.lat, e.lon, currentRoute.points);
+            if (!isAhead(routeIndex, target)) continue;
+            double d = OnlineServices.distanceMeters(lat, lon, e.lat, e.lon);
+            double trigger = e.closure ? 900 : 520;
+            if (d < trigger) {
+                announcedTrafficEvents.add(i);
+                currentWarning = e.type + ": " + e.description;
+                RoutePilotStore.markWarning(this);
+                navStatus.setText(e.closure
+                        ? "🚧 ACTUELE AFSLUITING VOORUIT" : "📡 ACTUELE VERKEERSINFO");
+                speak((e.closure ? "Let op. Actuele afsluiting. " : "Actuele verkeersmelding. ")
+                        + e.description);
+            }
+        }
 
-                double d = OnlineServices.distanceMeters(lat, lon, e.lat, e.lon);
-                double trigger = e.closure ? 850 : 500;
-                if (d < trigger) {
-                    announcedTrafficEvents.add(i);
-                    if (e.closure) {
-                        navStatus.setText("🚧 ACTUELE AFSLUITING OP ROUTE");
-                        speak("Let op. Actuele afsluiting gemeld door NDW. "
-                                + e.description + ". Controleer de route en bebording.");
-                    } else {
-                        navStatus.setText("📡 ACTUELE VERKEERSINFO");
-                        speak("Actuele verkeersmelding. " + e.type + ". "
-                                + e.description);
-                    }
-                }
+        for (RoadDataService.Sign s : currentRoute.roadSigns) {
+            if (!RoadDataService.isRestriction(s) || announcedRoadSigns.contains(s.id)) continue;
+            if (!isAhead(routeIndex, s.routeIndex)) continue;
+            double d = OnlineServices.distanceMeters(lat, lon, s.lat, s.lon);
+            if (d < 450) {
+                announcedRoadSigns.add(s.id);
+                currentWarning = s.description();
+                RoutePilotStore.markWarning(this);
+                navStatus.setText("🛑 OFFICIEEL VERKEERSBORD VOORUIT");
+                speak("Let op. " + s.description());
             }
         }
     }
 
-    private void applyReroute(String scanNote) {
+    private boolean isAhead(int currentIndex, int targetIndex) {
+        if (targetIndex < 0) return true;
+        int tolerance = Math.max(4, currentRoute.points.size() / 250);
+        return targetIndex >= currentIndex - tolerance;
+    }
+
+    private void refreshLiveTraffic() {
+        if (currentRoute == null || currentDestination == null || !navigating) return;
+        final OnlineServices.RouteResult snapshot = currentRoute;
+
+        new Thread(() -> {
+            try {
+                List<LiveTrafficService.TrafficEvent> events =
+                        LiveTrafficService.eventsNearRoute(snapshot.points);
+                int oldClosures = snapshot.liveClosureCount();
+                int newClosures = 0;
+                for (LiveTrafficService.TrafficEvent e : events) if (e.closure) newClosures++;
+                final int finalClosures = newClosures;
+
+                runOnUiThread(() -> {
+                    if (currentRoute != snapshot) return;
+                    currentRoute.trafficEvents = events;
+                    drawCurrentRoute();
+
+                    if (finalClosures > oldClosures && !routeLoading) {
+                        RoutePilotStore.markReroute(this);
+                        navStatus.setText("🚧 NIEUWE AFSLUITING • HERROUTEREN");
+                        speak("Nieuwe actuele afsluiting op of vlak langs de route. RoutePilot berekent opnieuw.");
+                        lastRerouteMs = System.currentTimeMillis();
+                        setRouteLoading(true);
+                        new Thread(() -> {
+                            try { calculateRouteInWorker(currentDestination, true); }
+                            catch (Exception e) {
+                                runOnUiThread(() -> {
+                                    navStatus.setText("🚧 AFSLUITING • herrouteren mislukt");
+                                    setRouteLoading(false);
+                                });
+                            }
+                        }).start();
+                    }
+                });
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
+    private void applyReroute(String note) {
         drawCurrentRoute();
         showDestinationMarker();
+        RoutePilotState.saveRoute(this, currentRoute);
+
         announcedApproachSteps.clear();
         announcedNearSteps.clear();
         announcedRestrictions.clear();
         announcedTrafficEvents.clear();
+        announcedRoadSigns.clear();
         currentStepIndex = currentRoute.steps.size() > 1 ? 1 : 0;
         navStatus.setText("NAVIGATIE ACTIEF • route bijgewerkt");
 
-        if (currentRoute.liveClosureCount() > 0) {
-            navStatus.setText("🚧 ACTUELE AFSLUITING OP ROUTE");
-        } else if (currentRoute.criticalCount() > 0) {
-            navStatus.setText("⚠ ROUTE HEEFT VOERTUIGWAARSCHUWING");
-        }
+        if (currentRoute.liveClosureCount() > 0) navStatus.setText("🚧 AFSLUITING OP ROUTE");
+        else if (currentRoute.criticalCount() > 0) navStatus.setText("⚠ VOERTUIGWAARSCHUWING");
+        else if (!currentAnalysis.destinationOnRight) navStatus.setText("🚪 AANKOMSTZIJDE CONTROLEREN");
 
-        speak("Nieuwe route geladen.");
+        speak("Nieuwe route geladen."
+                + (currentAnalysis.destinationOnRight ? " Rechterdeur aan ingangzijde ingesteld." : ""));
         updateNavigationProgress(currentLocation);
     }
 
     private void arrive() {
-        if (!navigating) return;
+        if (!navigating || currentDestination == null || currentAnalysis == null) return;
+
+        RoutePilotStore.LocationProfile p =
+                RoutePilotStore.findProfile(this, currentDestination.lat, currentDestination.lon);
+        if (p == null) p = new RoutePilotStore.LocationProfile();
+        p.label = currentDestination.label;
+        p.lat = currentDestination.lat;
+        p.lon = currentDestination.lon;
+        p.rightDoorToEntrance = true;
+        p.preferredArrivalBearing = currentAnalysis.approachBearing;
+        p.visits++;
+        RoutePilotStore.saveProfile(this, p);
+
         speak("Bestemming bereikt.");
         stopNavigation(true);
 
-        String liftText = vehicle.rearLift
-                ? "Achterliftmodus:\n\n• Zoek een zo vlak mogelijke stopplek.\n"
-                + "• Houd vrije ruimte achter de bus.\n"
-                + "• Controleer fietspad, paaltjes, stoeprand en verkeer.\n"
-                + "• Zet de bus veilig stil vóór je de lift bedient."
-                : "Controleer een veilige uitstapplaats en voldoende vrije ruimte.";
+        String side = currentAnalysis.destinationOnRight
+                ? "✓ RoutePilot heeft de rechterzijde als ingangzijde aangehouden."
+                : "⚠ RoutePilot kon de ingangzijde niet betrouwbaar rechts bevestigen. Controleer vóór uitstappen.";
 
+        String lift = vehicle.rearLift
+                ? "\n\nAchterlift:\n• Houd voldoende vrije ruimte achter de bus."
+                + "\n• Controleer fietspad, paaltjes, stoeprand en verkeer."
+                + "\n• Zet de bus volledig veilig stil vóór bediening."
+                : "";
+
+        final RoutePilotStore.LocationProfile saved = p;
         new AlertDialog.Builder(this)
                 .setTitle("Bestemming bereikt")
-                .setMessage(liftText)
+                .setMessage(side + lift)
+                .setNeutralButton("Aanrijzijde opslaan", (d, w) -> {
+                    saved.preferredArrivalBearing = currentAnalysis.approachBearing;
+                    saved.rightDoorToEntrance = true;
+                    RoutePilotStore.saveProfile(this, saved);
+                    Toast.makeText(this, "Aanrijzijde opgeslagen voor volgende rit.", Toast.LENGTH_SHORT).show();
+                })
                 .setPositiveButton("Klaar", null)
                 .show();
     }
@@ -909,23 +903,136 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         followMode = false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        RoutePilotState.update(this, false, "", "", 0, 0, 0,
+                -1, currentAnalysis == null ? 0 : currentAnalysis.score,
+                currentDestination == null ? "" : currentDestination.label);
+        stopService(new Intent(this, NavigationService.class));
+        RoutePilotStore.finishTrip(this);
+
         navArea.setVisibility(View.GONE);
         searchArea.setVisibility(View.VISIBLE);
         savedPlaces.setVisibility(View.VISIBLE);
+        previewArea.setVisibility(keepRoute && currentRoute != null ? View.VISIBLE
+                : currentRoute == null ? View.GONE : View.VISIBLE);
+        navStatus.setText("NAVIGATIE ACTIEF");
+    }
 
-        if (keepRoute && currentRoute != null) {
-            previewArea.setVisibility(View.VISIBLE);
-        } else {
-            previewArea.setVisibility(currentRoute == null ? View.GONE : View.VISIBLE);
+    private void showDriverReportDialog() {
+        if (currentLocation == null) return;
+        String[] options = {
+                "Bussluis", "Te laag", "Weg dicht", "Niet bereikbaar",
+                "Goede uitstapplek", "Smalle straat", "Vermijd deze weg"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("Chauffeursmelding")
+                .setItems(options, (dialog, which) -> {
+                    String type = options[which];
+                    showReportNote(type);
+                })
+                .setNegativeButton("Annuleren", null)
+                .show();
+    }
+
+    private void showReportNote(String type) {
+        EditText input = new EditText(this);
+        input.setHint("Optionele notitie");
+        new AlertDialog.Builder(this)
+                .setTitle(type)
+                .setView(input)
+                .setPositiveButton("Opslaan", (d, w) -> {
+                    RoutePilotStore.addReport(this, type, input.getText().toString(),
+                            currentLocation.getLatitude(), currentLocation.getLongitude());
+                    Toast.makeText(this, "Melding lokaal opgeslagen.", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("Annuleren", null)
+                .show();
+    }
+
+    private void showWhyRoute() {
+        if (currentAnalysis == null) return;
+        StringBuilder b = new StringBuilder(currentAnalysis.summary());
+        if (currentRoute != null && !currentRoute.selectionNote.isEmpty())
+            b.append("\n\n").append(currentRoute.selectionNote);
+        b.append("\n\nTilburgse busbaanontheffing is alleen actief binnen de officiële gemeentegrens.");
+        new AlertDialog.Builder(this)
+                .setTitle("Waarom deze route?")
+                .setMessage(b.toString())
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
+    private void showLocationProfileDialog() {
+        if (currentDestination == null || currentAnalysis == null) return;
+        RoutePilotStore.LocationProfile existing =
+                RoutePilotStore.findProfile(this, currentDestination.lat, currentDestination.lon);
+
+        EditText note = new EditText(this);
+        note.setHint("Bijv. ingang aan rechterzijde, achterom, liftplek...");
+        if (existing != null) note.setText(existing.note);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Locatieprofiel")
+                .setMessage("Rechterdeur naar de woning-/ingangzijde staat vast aan. "
+                        + "De huidige aanrijrichting wordt als voorkeur opgeslagen.")
+                .setView(note)
+                .setPositiveButton("Opslaan", (d, w) -> {
+                    RoutePilotStore.LocationProfile p = existing == null
+                            ? new RoutePilotStore.LocationProfile() : existing;
+                    p.label = currentDestination.label;
+                    p.note = note.getText().toString();
+                    p.lat = currentDestination.lat;
+                    p.lon = currentDestination.lon;
+                    p.preferredArrivalBearing = currentAnalysis.approachBearing;
+                    p.rightDoorToEntrance = true;
+                    RoutePilotStore.saveProfile(this, p);
+                    Toast.makeText(this, "Locatieprofiel opgeslagen.", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("Annuleren", null)
+                .show();
+    }
+
+    private void replayLatestTrip() {
+        List<RoutePilotStore.Trip> trips = RoutePilotStore.trips(this);
+        if (trips.isEmpty()) {
+            Toast.makeText(this, "Nog geen afgeronde rit om te replayen.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        RoutePilotStore.Trip t = trips.get(0);
+        List<GeoPoint> pts = new ArrayList<>();
+        try {
+            for (int i = 0; i < t.points.length(); i++) {
+                JSONArray p = t.points.getJSONArray(i);
+                pts.add(new GeoPoint(p.getDouble(0), p.getDouble(1)));
+            }
+        } catch (Exception ignored) {}
+
+        if (pts.size() < 2) {
+            Toast.makeText(this, "Voor deze rit zijn te weinig GPS-punten opgeslagen.", Toast.LENGTH_SHORT).show();
+            return;
         }
 
-        navStatus.setText("NAVIGATIE ACTIEF");
+        if (replayLine != null) map.getOverlays().remove(replayLine);
+        replayLine = new Polyline(map);
+        replayLine.setPoints(pts);
+        replayLine.getOutlinePaint().setColor(ORANGE);
+        replayLine.getOutlinePaint().setStrokeWidth(dp(7));
+        map.getOverlays().add(replayLine);
+        fitRoute(pts);
+        map.invalidate();
+
+        new AlertDialog.Builder(this)
+                .setTitle("Laatste rit replay")
+                .setMessage(t.destinationLabel + "\n"
+                        + String.format(NL, "%.1f km gereden • %d herrouteringen • %d waarschuwingen",
+                        t.actualDistanceM / 1000.0, t.reroutes, t.warnings))
+                .setPositiveButton("OK", null)
+                .show();
     }
 
     private void drawCurrentRoute() {
         if (routeLine != null) map.getOverlays().remove(routeLine);
-        for (Marker m : restrictionMarkers) map.getOverlays().remove(m);
-        restrictionMarkers.clear();
+        for (Marker m : routeMarkers) map.getOverlays().remove(m);
+        routeMarkers.clear();
 
         routeLine = new Polyline(map);
         routeLine.setPoints(currentRoute.points);
@@ -934,25 +1041,31 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         map.getOverlays().add(routeLine);
 
         for (OnlineServices.Restriction r : currentRoute.restrictions) {
-            Marker marker = new Marker(map);
-            marker.setPosition(new GeoPoint(r.lat, r.lon));
-            marker.setTitle(r.type);
-            marker.setSnippet(r.description);
-            marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-            restrictionMarkers.add(marker);
+            Marker marker = marker(r.lat, r.lon, r.type, r.description);
+            routeMarkers.add(marker);
             map.getOverlays().add(marker);
         }
-
         for (LiveTrafficService.TrafficEvent e : currentRoute.trafficEvents) {
-            Marker marker = new Marker(map);
-            marker.setPosition(new GeoPoint(e.lat, e.lon));
-            marker.setTitle("🚧 " + e.type + " • " + e.source);
-            marker.setSnippet(e.description);
-            marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-            restrictionMarkers.add(marker);
+            Marker marker = marker(e.lat, e.lon, "🚧 " + e.type + " • " + e.source, e.description);
+            routeMarkers.add(marker);
+            map.getOverlays().add(marker);
+        }
+        for (RoadDataService.Sign s : currentRoute.roadSigns) {
+            if (!s.isSpeed() && !RoadDataService.isRestriction(s)) continue;
+            Marker marker = marker(s.lat, s.lon, "🛑 " + s.rvvCode, s.description());
+            routeMarkers.add(marker);
             map.getOverlays().add(marker);
         }
         map.invalidate();
+    }
+
+    private Marker marker(double lat, double lon, String title, String snippet) {
+        Marker m = new Marker(map);
+        m.setPosition(new GeoPoint(lat, lon));
+        m.setTitle(title);
+        m.setSnippet(snippet);
+        m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+        return m;
     }
 
     private void showDestinationMarker() {
@@ -962,8 +1075,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
             destinationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
             map.getOverlays().add(destinationMarker);
         }
-        destinationMarker.setPosition(
-                new GeoPoint(currentDestination.lat, currentDestination.lon));
+        destinationMarker.setPosition(new GeoPoint(currentDestination.lat, currentDestination.lon));
         destinationMarker.setTitle(shortLabel(currentDestination.label));
         map.invalidate();
     }
@@ -971,18 +1083,14 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private void fitRoute(List<GeoPoint> points) {
         if (points == null || points.isEmpty()) return;
         double north = -90, south = 90, east = -180, west = 180;
-
         for (GeoPoint p : points) {
             north = Math.max(north, p.getLatitude());
             south = Math.min(south, p.getLatitude());
             east = Math.max(east, p.getLongitude());
             west = Math.min(west, p.getLongitude());
         }
-
         try {
-            map.zoomToBoundingBox(
-                    new BoundingBox(north, east, south, west),
-                    true, dp(55));
+            map.zoomToBoundingBox(new BoundingBox(north, east, south, west), true, dp(55));
         } catch (Exception ignored) {
             map.getController().animateTo(points.get(points.size() / 2));
         }
@@ -994,29 +1102,25 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
         List<DestinationStore.Item> favorites = DestinationStore.favorites(this);
         List<DestinationStore.Item> recent = DestinationStore.recent(this);
-
         int count = 0;
+
         for (DestinationStore.Item item : favorites) {
             if (count >= 5) break;
             savedPlaces.addView(placeButton("★ " + compactPlace(item.label), item));
             count++;
         }
-
         for (DestinationStore.Item item : recent) {
             if (count >= 8) break;
             boolean duplicate = false;
-            for (DestinationStore.Item favorite : favorites) {
-                if (Math.abs(favorite.lat - item.lat) < 0.00001
-                        && Math.abs(favorite.lon - item.lon) < 0.00001) {
-                    duplicate = true;
-                    break;
+            for (DestinationStore.Item f : favorites) {
+                if (Math.abs(f.lat - item.lat) < 0.00001 && Math.abs(f.lon - item.lon) < 0.00001) {
+                    duplicate = true; break;
                 }
             }
             if (duplicate) continue;
             savedPlaces.addView(placeButton("↺ " + compactPlace(item.label), item));
             count++;
         }
-
         if (count == 0) {
             TextView empty = text("Nog geen bestemmingen", 11, MUTED, Typeface.NORMAL);
             empty.setGravity(Gravity.CENTER_VERTICAL);
@@ -1030,13 +1134,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         b.setOnClickListener(v -> routeToStored(item));
         b.setOnLongClickListener(v -> {
             boolean added = DestinationStore.toggleFavorite(this, item);
-            Toast.makeText(this,
-                    added ? "Toegevoegd aan favorieten" : "Verwijderd uit favorieten",
+            Toast.makeText(this, added ? "Toegevoegd aan favorieten" : "Verwijderd uit favorieten",
                     Toast.LENGTH_SHORT).show();
             refreshSavedPlaces();
             return true;
         });
-
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
         lp.rightMargin = dp(6);
@@ -1046,13 +1148,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private void toggleFavorite() {
         if (currentDestination == null) return;
-        boolean added = DestinationStore.toggleFavorite(
-                this, currentDestination.toStoredItem());
+        boolean added = DestinationStore.toggleFavorite(this, currentDestination.toStoredItem());
         favoriteButton.setText(added ? "★ Favoriet" : "☆ Favoriet");
         refreshSavedPlaces();
-        Toast.makeText(this,
-                added ? "Favoriet opgeslagen" : "Favoriet verwijderd",
-                Toast.LENGTH_SHORT).show();
     }
 
     private void showVehicleSettings() {
@@ -1066,11 +1164,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         EditText height = numberField("Hoogte (m)", vehicle.heightM);
         EditText width = numberField("Breedte (m)", vehicle.widthM);
         EditText weight = numberField("Max. massa (ton)", vehicle.maxWeightT);
-
-        box.addView(length);
-        box.addView(height);
-        box.addView(width);
-        box.addView(weight);
+        box.addView(length); box.addView(height); box.addView(width); box.addView(weight);
 
         CheckBox rearLift = new CheckBox(this);
         rearLift.setText("Achterlift");
@@ -1078,12 +1172,12 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         box.addView(rearLift);
 
         CheckBox busLane = new CheckBox(this);
-        busLane.setText("Busbaanvrijstelling actief");
+        busLane.setText("Busbaanontheffing gemeente Tilburg");
         busLane.setChecked(vehicle.busLaneExemption);
         box.addView(busLane);
 
         TextView note = text(
-                "Bussluizen worden ook met busbaanvrijstelling als kritisch behandeld.",
+                "De busbaanontheffing wordt alleen binnen de officiële gemeentegrens van Tilburg toegepast. Bussluizen blijven altijd verboden.",
                 11, Color.DKGRAY, Typeface.NORMAL);
         note.setPadding(0, dp(8), 0, 0);
         box.addView(note);
@@ -1102,31 +1196,19 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
                         double h = parseNumber(height.getText().toString());
                         double w = parseNumber(width.getText().toString());
                         double m = parseNumber(weight.getText().toString());
-
-                        if (l < 2 || h < 1.5 || w < 1.5 || m < 0.5) {
+                        if (l < 2 || h < 1.5 || w < 1.5 || m < 0.5)
                             throw new IllegalArgumentException();
-                        }
 
-                        vehicle.lengthM = l;
-                        vehicle.heightM = h;
-                        vehicle.widthM = w;
-                        vehicle.maxWeightT = m;
-                        vehicle.rearLift = rearLift.isChecked();
+                        vehicle.lengthM = l; vehicle.heightM = h; vehicle.widthM = w;
+                        vehicle.maxWeightT = m; vehicle.rearLift = rearLift.isChecked();
                         vehicle.busLaneExemption = busLane.isChecked();
                         vehicle.save(this);
                         refreshVehicleSummary();
                         dialog.dismiss();
-
-                        Toast.makeText(this,
-                                "Voertuigprofiel opgeslagen",
-                                Toast.LENGTH_SHORT).show();
                     } catch (Exception e) {
-                        Toast.makeText(this,
-                                "Controleer de ingevoerde voertuigwaarden.",
-                                Toast.LENGTH_LONG).show();
+                        Toast.makeText(this, "Controleer de voertuigwaarden.", Toast.LENGTH_LONG).show();
                     }
                 }));
-
         dialog.show();
     }
 
@@ -1142,21 +1224,39 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private void refreshVehicleSummary() {
         vehicleSummary.setText(String.format(NL,
-                "🚐 %.2f m lang • %.2f m hoog • %.2f m breed • %.2f t%s",
-                vehicle.lengthM, vehicle.heightM, vehicle.widthM, vehicle.maxWeightT,
-                vehicle.busLaneExemption ? " • busbaanvrijstelling" : ""));
+                "🚐 %.2f×%.2f×%.2f m • %.2f t%s • 🚪 rechts-ingang",
+                vehicle.lengthM, vehicle.widthM, vehicle.heightM, vehicle.maxWeightT,
+                vehicle.busLaneExemption ? " • Tilburg-ontheffing" : ""));
+    }
+
+    private void applyAutoNightMode() {
+        int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        boolean night = hour >= 20 || hour < 7;
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = night ? 0.45f : -1f;
+        getWindow().setAttributes(lp);
+        try {
+            map.getOverlayManager().getTilesOverlay().setColorFilter(
+                    night ? TilesOverlay.INVERT_COLORS : null);
+        } catch (Exception ignored) {}
+    }
+
+    private void handleNavigationIntent(Intent intent) {
+        if (intent == null || intent.getData() == null || destinationInput == null) return;
+        Uri data = intent.getData();
+        if (!"geo".equalsIgnoreCase(data.getScheme())) return;
+        String q = data.getQueryParameter("q");
+        if (q != null && !q.trim().isEmpty()) destinationInput.setText(q);
     }
 
     private void centerOnMe() {
         if (currentLocation == null) {
             Toast.makeText(this, "Nog geen GPS-positie.", Toast.LENGTH_SHORT).show();
-            startLocation();
             return;
         }
         map.getController().setZoom(navigating ? 17.0 : 16.5);
         map.getController().animateTo(new GeoPoint(
-                currentLocation.getLatitude(),
-                currentLocation.getLongitude()));
+                currentLocation.getLatitude(), currentLocation.getLongitude()));
     }
 
     private void setRouteLoading(boolean loading) {
@@ -1165,7 +1265,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         routeButton.setText(loading ? "…" : "Route");
         if (loading && !navigating) {
             previewArea.setVisibility(View.VISIBLE);
-            routeMeta.setText("Online route en voertuigscan worden geladen…");
+            routeMeta.setText("OSRM + OSM + NDW + Tilburg-profiel worden gecontroleerd…");
             startButton.setEnabled(false);
         }
     }
@@ -1197,16 +1297,16 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private String formatDistance(double meters) {
         if (meters < 1000) {
             int rounded = meters < 100
-                    ? (int) (Math.round(meters / 10.0) * 10)
-                    : (int) (Math.round(meters / 50.0) * 50);
+                    ? (int)(Math.round(meters / 10.0) * 10)
+                    : (int)(Math.round(meters / 50.0) * 50);
             return rounded + " m";
         }
         return String.format(NL, "%.1f km", meters / 1000.0);
     }
 
     private String spokenDistance(double meters) {
-        if (meters < 1000) return formatDistance(meters);
-        return String.format(NL, "%.1f kilometer", meters / 1000.0);
+        return meters < 1000 ? formatDistance(meters)
+                : String.format(NL, "%.1f kilometer", meters / 1000.0);
     }
 
     private double parseNumber(String value) {
@@ -1217,14 +1317,13 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         View v = getCurrentFocus();
         if (v == null) v = destinationInput;
         InputMethodManager imm =
-                (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                (InputMethodManager)getSystemService(Context.INPUT_METHOD_SERVICE);
         if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
     }
 
     private void speak(String message) {
-        if (tts != null && message != null && !message.trim().isEmpty()) {
-            tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "routepilot-v1");
-        }
+        if (tts != null && message != null && !message.trim().isEmpty())
+            tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "routepilot-v2");
     }
 
     @Override
@@ -1237,52 +1336,39 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
 
     private Button smallButton(String label) {
         Button b = new Button(this);
-        b.setText(label);
-        b.setTextSize(13);
-        b.setTextColor(Color.rgb(3, 18, 28));
-        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        b.setAllCaps(false);
+        b.setText(label); b.setTextSize(13); b.setTextColor(Color.rgb(3, 18, 28));
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setAllCaps(false);
         b.setBackground(rounded(BLUE, 13));
         return b;
     }
 
     private Button darkButton(String label) {
         Button b = new Button(this);
-        b.setText(label);
-        b.setTextSize(12);
-        b.setTextColor(TEXT);
-        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        b.setAllCaps(false);
+        b.setText(label); b.setTextSize(12); b.setTextColor(TEXT);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setAllCaps(false);
         b.setBackground(rounded(PANEL_2, 13));
         return b;
     }
 
     private Button dangerButton(String label) {
         Button b = new Button(this);
-        b.setText(label);
-        b.setTextSize(12);
-        b.setTextColor(TEXT);
-        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        b.setAllCaps(false);
+        b.setText(label); b.setTextSize(12); b.setTextColor(TEXT);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setAllCaps(false);
         b.setBackground(rounded(Color.rgb(105, 32, 42), 13));
         return b;
     }
 
     private TextView text(String value, int sp, int color, int style) {
         TextView v = new TextView(this);
-        v.setText(value);
-        v.setTextSize(sp);
-        v.setTextColor(color);
-        v.setTypeface(Typeface.DEFAULT, style);
-        v.setLineSpacing(0, 1.10f);
+        v.setText(value); v.setTextSize(sp); v.setTextColor(color);
+        v.setTypeface(Typeface.DEFAULT, style); v.setLineSpacing(0, 1.10f);
         return v;
     }
 
     private android.graphics.drawable.GradientDrawable rounded(int color, int radiusDp) {
         android.graphics.drawable.GradientDrawable d =
                 new android.graphics.drawable.GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(dp(radiusDp));
+        d.setColor(color); d.setCornerRadius(dp(radiusDp));
         return d;
     }
 
@@ -1290,28 +1376,21 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         return Math.round(dp * getResources().getDisplayMetrics().density);
     }
 
-    @Override
-    protected void onResume() {
+    @Override protected void onResume() {
         super.onResume();
         if (map != null) map.onResume();
+        applyAutoNightMode();
     }
 
-    @Override
-    protected void onPause() {
+    @Override protected void onPause() {
         if (map != null) map.onPause();
         super.onPause();
     }
 
-    @Override
-    protected void onDestroy() {
-        try {
-            if (locationManager != null) locationManager.removeUpdates(this);
-        } catch (Exception ignored) {}
-
-        if (tts != null) {
-            tts.stop();
-            tts.shutdown();
-        }
+    @Override protected void onDestroy() {
+        try { if (locationManager != null) locationManager.removeUpdates(this); }
+        catch (Exception ignored) {}
+        if (tts != null) { tts.stop(); tts.shutdown(); }
         if (map != null) map.onDetach();
         super.onDestroy();
     }
