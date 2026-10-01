@@ -14,6 +14,8 @@ import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.speech.tts.TextToSpeech;
 import android.view.Gravity;
 import android.view.View;
@@ -80,6 +82,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private OnlineServices.SearchResult currentDestination;
     private OnlineServices.RouteResult currentRoute;
     private RouteAnalysis.Result currentAnalysis;
+    private RouteConfidence.Result currentConfidence;
+    private ArrivalEngine.Result currentArrival;
+    private DestinationAccessService.Result currentDestinationAccess;
 
     private boolean centeredOnce = false;
     private boolean navigating = false;
@@ -94,6 +99,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private double currentStepDistance = 0;
     private String currentInstruction = "Volg de route";
     private String currentWarning = "";
+    private LookAheadEngine.Result currentLookAhead = new LookAheadEngine.Result();
+
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private boolean waitMinuteAnnounced = false;
+    private boolean waitExpiredAnnounced = false;
 
     private final Set<Integer> announcedApproachSteps = new HashSet<>();
     private final Set<Integer> announcedNearSteps = new HashSet<>();
@@ -113,14 +123,23 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
     private TextView navStatus;
     private TextView navSpeed;
     private TextView navScore;
+    private TextView lookAheadText;
+    private TextView arrivalText;
+    private TextView confidenceText;
+    private TextView wmoPhaseText;
+    private TextView waitTimerText;
     private Button routeButton;
     private Button startButton;
     private Button favoriteButton;
+    private Button boardedButton;
+    private Button noShowButton;
+    private Button tripDoneButton;
 
     private LinearLayout searchArea;
     private LinearLayout previewArea;
     private LinearLayout navArea;
     private LinearLayout savedPlaces;
+    private LinearLayout wmoArea;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -168,6 +187,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         buildSavedPlaces(panel);
         buildPreview(panel);
         buildNavigation(panel);
+        buildWmoPanel(panel);
 
         TextView disclaimer = text(
                 "RoutePilot V2 debug • OSM/OSRM/NDW/PDOK • fysieke bebording en actuele afzettingen blijven leidend.",
@@ -183,6 +203,8 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         startLocation();
         requestNotificationPermissionIfNeeded();
         handleNavigationIntent(getIntent());
+        updateWmoPanel();
+        uiHandler.post(waitTicker);
     }
 
     private void buildHeader(LinearLayout panel) {
