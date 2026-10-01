@@ -248,7 +248,7 @@ public final class RoutePilotStore {
         List<Trip> trips=trips(c); List<Report> reports=reports(c);
         double km=0;int reroutes=0,warnings=0;
         for(Trip t:trips){km+=t.actualDistanceM/1000.0;reroutes+=t.reroutes;warnings+=t.warnings;}
-        return String.format(Locale.NL,"%d ritten • %.1f km • %d herrouteringen • %d waarschuwingen • %d chauffeursmeldingen",
+        return String.format(new Locale("nl","NL"),"%d ritten • %.1f km • %d herrouteringen • %d waarschuwingen • %d chauffeursmeldingen",
                 trips.size(),km,reroutes,warnings,reports.size());
     }
 
