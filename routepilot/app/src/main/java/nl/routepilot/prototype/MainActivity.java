@@ -540,6 +540,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         WmoSessionManager.Snapshot before = WmoSessionManager.get(this);
         if (before.phase != WmoSessionManager.Phase.WAITING_PICKUP) return;
         WmoSessionManager.passengerBoarded(this);
+        stopService(new Intent(this, NavigationService.class));
         waitTimerText.setText("");
         noShowButton.setEnabled(false);
         searchArea.setVisibility(View.VISIBLE);
@@ -556,6 +557,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         WmoSessionManager.Snapshot s = WmoSessionManager.get(this);
         if (s.phase != WmoSessionManager.Phase.WAITING_PICKUP || s.waitRemainingMs() > 0) return;
         WmoSessionManager.noShow(this);
+        stopService(new Intent(this, NavigationService.class));
         if (currentLocation != null) {
             RoutePilotStore.addReport(this, "LOOS / NO-SHOW", "3 minuten wachttijd verstreken",
                     currentLocation.getLatitude(), currentLocation.getLongitude());
@@ -1181,11 +1183,11 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         WmoSessionManager.Phase phase = wmo.phase;
 
         speak("Bestemming bereikt.");
-        stopNavigation(false);
 
         if (phase == WmoSessionManager.Phase.TO_PICKUP
                 || phase == WmoSessionManager.Phase.IDLE) {
             WmoSessionManager.arrivePickup(this);
+            stopNavigation(false);
             promptPendingLearningIfNeeded();
             waitMinuteAnnounced = false;
             waitExpiredAnnounced = false;
@@ -1206,6 +1208,7 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         if (phase == WmoSessionManager.Phase.TO_DROPOFF
                 || phase == WmoSessionManager.Phase.PASSENGER_ONBOARD) {
             WmoSessionManager.arriveDropoff(this);
+            stopNavigation(false);
             promptPendingLearningIfNeeded();
             updateWmoPanel();
             searchArea.setVisibility(View.GONE);
@@ -1237,7 +1240,9 @@ public class MainActivity extends Activity implements LocationListener, TextToSp
         RoutePilotState.update(this, false, "", "", 0, 0, 0,
                 -1, currentAnalysis == null ? 0 : currentAnalysis.score,
                 currentDestination == null ? "" : currentDestination.label);
-        stopService(new Intent(this, NavigationService.class));
+        WmoSessionManager.Snapshot wmoState = WmoSessionManager.get(this);
+        if (wmoState.phase != WmoSessionManager.Phase.WAITING_PICKUP)
+            stopService(new Intent(this, NavigationService.class));
         RoutePilotStore.finishTrip(this);
 
         navArea.setVisibility(View.GONE);
