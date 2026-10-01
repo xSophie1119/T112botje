@@ -79,7 +79,9 @@ function renderScenarios(){
   el('scenarioList').innerHTML=list.map(x=>{
     const gap=Number(x.destination_target_to_stop_m||0);
     const stop=x.destination_stop_name||'route-stop';
-    return '<div class="scenario '+(state.selected&&state.selected.id===x.id?'selected':'')+'" data-id="'+x.id+'"><div class="scenario-top"><span>'+esc(x.origin_name)+' → '+esc(x.destination_name)+'</span><span class="status-dot '+esc(x.status)+'"></span></div><div class="scenario-meta"><span>'+km(x.distance_m)+'</span><span>'+mins(x.duration_s)+'</span><span>'+x.correction_hits+' correcties</span></div>'+(gap?'<div class="scenario-meta"><span>stop: '+esc(stop)+'</span><span>'+Math.round(gap)+' m van doel</span></div>':'')+(x.error?'<div class="scenario-meta">'+esc(x.error)+'</div>':'')+'</div>';
+    const cat=x.trip_category==='hospital'?'🏥 ziekenhuis':(x.trip_category==='care'?'🏡 zorg':'📍 overig');
+    const ring=(x.origin_zone==='outside'?'BUITEN':'BINNEN')+'→'+(x.destination_zone==='outside'?'BUITEN':'BINNEN');
+    return '<div class="scenario '+(state.selected&&state.selected.id===x.id?'selected':'')+'" data-id="'+x.id+'"><div class="scenario-top"><span>'+esc(x.origin_name)+' → '+esc(x.destination_name)+'</span><span class="status-dot '+esc(x.status)+'"></span></div><div class="scenario-meta"><span>'+cat+'</span><span>'+ring+'</span><span>'+km(x.distance_m)+'</span></div><div class="scenario-meta"><span>'+mins(x.duration_s)+'</span><span>'+x.correction_hits+' correcties</span></div>'+(gap?'<div class="scenario-meta"><span>stop: '+esc(stop)+'</span><span>'+Math.round(gap)+' m van doel</span></div>':'')+(x.error?'<div class="scenario-meta">'+esc(x.error)+'</div>':'')+'</div>';
   }).join('')||'<div class="hint">Nog geen simulaties.</div>';
   document.querySelectorAll('.scenario').forEach(n=>n.onclick=()=>openScenario(Number(n.dataset.id)));
 }
