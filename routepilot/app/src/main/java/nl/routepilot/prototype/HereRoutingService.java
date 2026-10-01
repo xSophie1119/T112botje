@@ -117,6 +117,52 @@ public final class HereRoutingService {
         return out;
     }
 
+    public static double estimateDurationSeconds(
+            Context context,double fromLat,double fromLon,
+            OnlineServices.SearchResult destination,VehicleProfile vehicle,
+            RoutingProviderSettings settings)throws Exception{
+        if(settings==null||!settings.hasHereKey())
+            throw new IllegalStateException("HERE API-key ontbreekt.");
+
+        String dest=String.format(Locale.US,"%.6f,%.6f",destination.lat,destination.lon);
+        double[] hint=sideHint(context,destination);
+        if(hint!=null){
+            dest+=String.format(Locale.US,
+                    ";sideOfStreetHint=%.6f,%.6f;matchSideOfStreet=always",
+                    hint[0],hint[1]);
+        }
+
+        StringBuilder url=new StringBuilder(BASE).append("?")
+                .append("origin=").append(enc(String.format(Locale.US,"%.6f,%.6f",fromLat,fromLon)))
+                .append("&destination=").append(enc(dest))
+                .append("&transportMode=car")
+                .append("&routingMode=fast")
+                .append("&departureTime=now")
+                .append("&alternatives=0")
+                .append("&return=summary")
+                .append("&avoid%5Bfeatures%5D=uTurns")
+                .append("&vehicle%5Bheight%5D=").append((int)Math.round(vehicle.heightM*100.0))
+                .append("&vehicle%5Bwidth%5D=").append((int)Math.round(vehicle.widthM*100.0))
+                .append("&vehicle%5Blength%5D=").append((int)Math.round(vehicle.lengthM*100.0))
+                .append("&vehicle%5BcurrentWeight%5D=").append((int)Math.round(vehicle.maxWeightT*1000.0))
+                .append("&vehicle%5BgrossWeight%5D=").append((int)Math.round(vehicle.maxWeightT*1000.0))
+                .append("&apiKey=").append(enc(settings.hereApiKey.trim()));
+
+        JSONObject root=new JSONObject(HttpClient.get(url.toString(),9000));
+        JSONArray routes=root.optJSONArray("routes");
+        if(routes==null||routes.length()==0)throw new IllegalArgumentException("Geen HERE ETA.");
+        JSONArray sections=routes.getJSONObject(0).optJSONArray("sections");
+        if(sections==null)throw new IllegalArgumentException("Geen HERE ETA-secties.");
+        double duration=0.0;
+        for(int i=0;i<sections.length();i++){
+            JSONObject s=sections.optJSONObject(i);
+            JSONObject summary=s==null?null:s.optJSONObject("summary");
+            if(summary!=null)duration+=summary.optDouble("duration",0.0);
+        }
+        if(duration<=0)throw new IllegalArgumentException("Ongeldige HERE ETA.");
+        return duration;
+    }
+
     private static void appendGeometry(List<GeoPoint> all,List<GeoPoint> section){
         for(GeoPoint p:section){
             if(!all.isEmpty()){
